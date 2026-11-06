@@ -1,0 +1,17 @@
+[Unit]
+Description=blockoverlayfs snapshotter for containerd
+Documentation=https://github.com/YiD11/blockoverlayfs
+After=network.target local-fs.target
+Before=containerd.service
+
+# Do not add PrivateMounts=, PrivateTmp=, ProtectSystem=, ProtectHome= or MountFlags=. The block layers this
+# daemon mounts must appear in the host's mount namespace, where containerd's shims mount container rootfs.
+[Service]
+Type=notify
+ExecStartPre=-/sbin/modprobe loop
+ExecStart=/usr/local/bin/containerd-blockoverlayfs-grpc --config=/etc/containerd-blockoverlayfs-grpc/config.toml
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

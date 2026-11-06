@@ -1,0 +1,23 @@
+# Merge into /etc/containerd/config.toml (containerd 1.7, config version 2), then restart containerd. Tables that
+# already exist there take the keys below instead of being defined a second time.
+version = 2
+
+[proxy_plugins.blockoverlayfs]
+  type = "snapshot"
+  address = "/run/containerd-blockoverlayfs-grpc/containerd-blockoverlayfs-grpc.sock"
+  # Required. CRI reports this path to kubelet as the image filesystem. Without it CRI falls back to
+  # <containerd root>/io.containerd.snapshotter.v1.blockoverlayfs, and if that path does not exist kubelet cannot
+  # read the image filesystem and its eviction manager stops evicting. Use the snapshotter's `root`.
+  exports = { root = "/var/lib/containerd/io.containerd.snapshotter.v1.blockoverlayfs" }
+
+# Makes every new CRI container use the proxy. To scope it to one RuntimeClass instead, set
+# plugins."io.containerd.grpc.v1.cri".containerd.runtimes.<handler>.snapshotter = "blockoverlayfs".
+[plugins."io.containerd.grpc.v1.cri".containerd]
+  snapshotter = "blockoverlayfs"
+
+# Required. Copies the annotation the platform writes on the Pod into each container's OCI spec, which is where
+# the snapshotter reads a container's ephemeral-storage request and limit. Set it on every runtime handler Pods
+# use: the default_runtime_name one (runc below) and any others, such as nvidia. Without it every container is
+# sized as undeclared and the snapshotter logs a warning for each. Append to an existing pod_annotations list.
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  pod_annotations = ["scitix.ai/ephemeral-storage"]
