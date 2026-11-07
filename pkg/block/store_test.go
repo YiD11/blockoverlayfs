@@ -36,7 +36,7 @@ func entries(t *testing.T, root string) []string {
 func TestRecordDirectoryPersists(t *testing.T) {
 	root := t.TempDir()
 	s := openStore(t, root)
-	st := State{Key: "k8s.io/12/abc", Reason: "no ephemeral-storage", Container: &Container{Namespace: "k8s.io", ID: "abc"}}
+	st := State{Key: "k8s.io/12/abc"}
 	if err := s.RecordDirectory("7", st); err != nil {
 		t.Fatal(err)
 	}
@@ -49,11 +49,28 @@ func TestRecordDirectoryPersists(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Load() = %+v, %v, %v", got, ok, err)
 	}
-	if got.Key != st.Key || got.Size != 0 || got.Version != stateVersion || got.Container.ID != "abc" {
+	if got.Key != st.Key || got.Size != 0 || got.Version != stateVersion {
 		t.Fatalf("Load() = %+v, want %+v", got, st)
 	}
 	if names := entries(t, root); !slices.Equal(names, []string{"7"}) {
 		t.Fatalf("store holds %v, want only the layer", names)
+	}
+}
+
+func TestLoadReadsStateWrittenByEarlierVersions(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "7")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"version":1,"key":"k8s.io/12/abc","size":1048576,"reason":"limit","created":"2026-11-06T10:00:00Z",` +
+		`"container":{"namespace":"k8s.io","id":"abc","podName":"web"}}`
+	if err := os.WriteFile(filepath.Join(dir, stateName), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := openStore(t, root).Load("7")
+	if err != nil || !ok || got.Key != "k8s.io/12/abc" || got.Size != 1<<20 {
+		t.Fatalf("Load() = %+v, %v, %v; want the recorded key and size", got, ok, err)
 	}
 }
 

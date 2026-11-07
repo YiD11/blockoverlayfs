@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/containerd/containerd/errdefs"
@@ -82,7 +81,7 @@ func (h *harness) innerMounts(t *testing.T, key string) []mount.Mount {
 
 func TestMountsCreatesABlockLayerOnce(t *testing.T) {
 	h := newHarness(t, Options{})
-	h.decider.decisions[appKey] = Decision{Final: true, Size: 3 * gi, Reason: "limit", Container: &block.Container{ID: "app"}}
+	h.decider.decisions[appKey] = Decision{Final: true, Size: 3 * gi, Reason: "limit"}
 	l := h.layers.Layer(appID)
 	for i := 0; i < 2; i++ {
 		mounts, err := h.sn.Mounts(ctx, appKey)
@@ -101,7 +100,7 @@ func TestMountsCreatesABlockLayerOnce(t *testing.T) {
 	if want := []string{h.inner.upper(appID), h.inner.upper(appID)}; !slices.Equal(h.layers.ownerFroms, want) {
 		t.Fatalf("layer took its owner from %q, want the directory upper %q", h.layers.ownerFroms, want)
 	}
-	if st := h.layers.states[appID]; st.Key != appKey || st.Reason != "limit" || st.Created.IsZero() || st.Container.ID != "app" {
+	if st := h.layers.states[appID]; st.Key != appKey || st.Size != 3*gi {
 		t.Fatalf("recorded %+v", st)
 	}
 }
@@ -163,8 +162,8 @@ func TestMountsKeepsADirectoryUpperAlreadyInUse(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, h.innerMounts(t, appKey)) {
 		t.Fatalf("Mounts() = %+v, %v; want the inner mounts", got, err)
 	}
-	if st := h.layers.states[appID]; st.Size != 0 || !strings.Contains(st.Reason, "already has content") || !strings.Contains(st.Reason, "limit") {
-		t.Fatalf("recorded %+v, want a directory decision that says why", st)
+	if st := h.layers.states[appID]; st.Key != appKey || st.Size != 0 {
+		t.Fatalf("recorded %+v, want a directory decision", st)
 	}
 	h.requireEvents(t, "record-directory:2")
 }

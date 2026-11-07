@@ -11,18 +11,14 @@ import (
 )
 
 func TestFromLabels(t *testing.T) {
-	got := FromLabels("k8s.io", "abc", map[string]string{
+	got := FromLabels(map[string]string{
 		LabelKind:          KindContainer,
-		LabelPodUID:        "uid-1",
 		LabelPodNamespace:  "default",
 		LabelPodName:       "web",
 		LabelContainerName: "app",
 	})
 	want := Info{
-		Namespace:     "k8s.io",
-		ID:            "abc",
 		Kind:          KindContainer,
-		PodUID:        "uid-1",
 		PodNamespace:  "default",
 		PodName:       "web",
 		ContainerName: "app",

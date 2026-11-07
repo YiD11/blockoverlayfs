@@ -20,12 +20,12 @@ func (failingLookup) Lookup(context.Context, string, string) (containermeta.Info
 func TestCRIDecider(t *testing.T) {
 	declared := map[string]string{annotation.Key: `{"app":{"request":"1Gi","limit":"4Gi"},"plain":{}}`}
 	app := containermeta.Info{
-		Namespace: "k8s.io", ID: "app", Kind: containermeta.KindContainer, SnapshotKey: "app",
-		PodUID: "uid-1", PodNamespace: "default", PodName: "web", ContainerName: "app", Annotations: declared,
+		Kind: containermeta.KindContainer, SnapshotKey: "app",
+		PodNamespace: "default", PodName: "web", ContainerName: "app", Annotations: declared,
 	}
 	with := func(id string, change func(*containermeta.Info)) containermeta.Info {
 		c := app
-		c.ID, c.SnapshotKey, c.ContainerName = id, id, id
+		c.SnapshotKey, c.ContainerName = id, id
 		change(&c)
 		return c
 	}
@@ -73,7 +73,7 @@ func TestCRIDecider(t *testing.T) {
 			if got.Final != tt.wantFinal || got.Size != tt.wantSize {
 				t.Fatalf("Decide() = %+v, want final=%v size=%d", got, tt.wantFinal, tt.wantSize)
 			}
-			if got.Final && (got.Reason == "" || got.Container == nil || got.Container.ID == "") {
+			if got.Final && (got.Reason == "" || got.Pod == "" || got.Container == "") {
 				t.Fatalf("Decide() = %+v, want a reason and the container", got)
 			}
 			if !strings.Contains(got.Reason, tt.wantReason) {
@@ -86,8 +86,8 @@ func TestCRIDecider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c := got.Container; c.Namespace != "k8s.io" || c.PodNamespace != "default" || c.PodName != "web" || c.PodUID != "uid-1" || c.Name != "app" {
-		t.Fatalf("recorded container = %+v", c)
+	if got.Pod != "default/web" || got.Container != "app" {
+		t.Fatalf("Decide() names pod %q and container %q, want default/web and app", got.Pod, got.Container)
 	}
 }
 

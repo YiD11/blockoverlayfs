@@ -19,7 +19,6 @@ import (
 // labels are the container labels kubelet passes in CreateContainer.
 const (
 	LabelKind          = "io.cri-containerd.kind"
-	LabelPodUID        = "io.kubernetes.pod.uid"
 	LabelPodNamespace  = "io.kubernetes.pod.namespace"
 	LabelPodName       = "io.kubernetes.pod.name"
 	LabelContainerName = "io.kubernetes.container.name"
@@ -29,10 +28,7 @@ const (
 )
 
 type Info struct {
-	Namespace     string
-	ID            string
 	Kind          string
-	PodUID        string
 	PodNamespace  string
 	PodName       string
 	ContainerName string
@@ -43,12 +39,9 @@ type Info struct {
 	Annotations map[string]string
 }
 
-func FromLabels(namespace, id string, labels map[string]string) Info {
+func FromLabels(labels map[string]string) Info {
 	return Info{
-		Namespace:     namespace,
-		ID:            id,
 		Kind:          labels[LabelKind],
-		PodUID:        labels[LabelPodUID],
 		PodNamespace:  labels[LabelPodNamespace],
 		PodName:       labels[LabelPodName],
 		ContainerName: labels[LabelContainerName],
@@ -81,7 +74,7 @@ func (c *Client) Lookup(ctx context.Context, namespace, id string) (Info, error)
 	if err != nil {
 		return Info{}, errdefs.FromGRPC(err)
 	}
-	info := FromLabels(namespace, id, resp.GetContainer().GetLabels())
+	info := FromLabels(resp.GetContainer().GetLabels())
 	info.SnapshotKey = resp.GetContainer().GetSnapshotKey()
 	// An unreadable spec only loses the annotations; failing here would keep every container from starting.
 	if info.Annotations, err = SpecAnnotations(resp.GetContainer().GetSpec()); err != nil {

@@ -9,7 +9,7 @@ log_level = "info"
 
 [containerd]
 # Used to read the record of the container that owns a snapshot: its CRI labels (kind, pod, container name) and
-# the scitix.ai/ephemeral-storage annotation of its OCI spec, which carries the container's ephemeral-storage
+# the blockoverlayfs.io/ephemeral-storage annotation of its OCI spec, which carries the container's ephemeral-storage
 # request and limit. The platform writes the annotation on the Pod, and containerd's pod_annotations setting
 # (deploy/containerd/config.toml) copies it into the spec.
 address = "/run/containerd/containerd.sock"

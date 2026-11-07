@@ -8,7 +8,6 @@ import (
 	"github.com/containerd/log"
 
 	"github.com/YiD11/blockoverlayfs/pkg/annotation"
-	"github.com/YiD11/blockoverlayfs/pkg/block"
 	"github.com/YiD11/blockoverlayfs/pkg/containermeta"
 	"github.com/YiD11/blockoverlayfs/pkg/sizing"
 )
@@ -27,10 +26,12 @@ type Decider interface {
 // rootfs, or cannot be decided yet; nothing is recorded then and the next Mounts asks again. A final decision
 // with Size zero keeps the directory upper.
 type Decision struct {
-	Final     bool
-	Size      int64
-	Reason    string
-	Container *block.Container
+	Final  bool
+	Size   int64
+	Reason string
+	// Pod, as namespace/name, and Container name the container in the log line; neither is recorded.
+	Pod       string
+	Container string
 }
 
 // CRIDecider sizes the rootfs of Kubernetes containers. containerd's metadata layer names a backend snapshot
@@ -75,22 +76,16 @@ func (d *CRIDecider) Decide(ctx context.Context, key string) (Decision, error) {
 		reason = note + ": " + reason
 	}
 	return Decision{
-		Final:  true,
-		Size:   r.Size,
-		Reason: reason,
-		Container: &block.Container{
-			Namespace:    c.Namespace,
-			ID:           c.ID,
-			PodNamespace: c.PodNamespace,
-			PodName:      c.PodName,
-			PodUID:       c.PodUID,
-			Name:         c.ContainerName,
-		},
+		Final:     true,
+		Size:      r.Size,
+		Reason:    reason,
+		Pod:       c.PodNamespace + "/" + c.PodName,
+		Container: c.ContainerName,
 	}, nil
 }
 
 // declaration reads what the container declares from the annotation. A container it cannot read counts as
-// declaring nothing, so it still starts; note says why, for the recorded reason.
+// declaring nothing, so it still starts; note says why, for the logged reason.
 func declaration(ctx context.Context, c containermeta.Info) (sizing.Resources, string) {
 	fields := log.Fields{"pod": c.PodNamespace + "/" + c.PodName, "container": c.ContainerName}
 	raw, ok := c.Annotations[annotation.Key]

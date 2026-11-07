@@ -289,21 +289,22 @@ func (s *Snapshotter) writableLayer(ctx context.Context, sn snapshot) (block.Sta
 	if !d.Final {
 		return block.State{}, nil
 	}
-	st = block.State{Key: key, Size: d.Size, Reason: d.Reason, Created: time.Now().UTC(), Container: d.Container}
+	st = block.State{Key: key, Size: d.Size}
+	reason := d.Reason
 	if st.Size > 0 {
 		replaceable, why, err := s.layers.Replaceable(sn.upper)
 		if err != nil {
 			return block.State{}, err
 		}
 		if !replaceable {
-			st.Size, st.Reason = 0, fmt.Sprintf("%s, so it is kept instead of a block layer (%s)", why, d.Reason)
+			st.Size, reason = 0, fmt.Sprintf("%s, so it is kept instead of a block layer (%s)", why, d.Reason)
 		}
 	}
 
-	fields := log.Fields{"key": key, "layer": sn.id, "size": st.Size, "reason": st.Reason}
-	if c := st.Container; c != nil {
-		fields["pod"] = c.PodNamespace + "/" + c.PodName
-		fields["container"] = c.Name
+	fields := log.Fields{"key": key, "layer": sn.id, "size": st.Size, "reason": reason}
+	if d.Pod != "" {
+		fields["pod"] = d.Pod
+		fields["container"] = d.Container
 	}
 	if st.Size == 0 {
 		if err := s.layers.RecordDirectory(sn.id, st); err != nil {

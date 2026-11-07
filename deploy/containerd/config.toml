@@ -20,4 +20,4 @@ version = 2
 # use: the default_runtime_name one (runc below) and any others, such as nvidia. Without it every container is
 # sized as undeclared and the snapshotter logs a warning for each. Append to an existing pod_annotations list.
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
-  pod_annotations = ["scitix.ai/ephemeral-storage"]
+  pod_annotations = ["blockoverlayfs.io/ephemeral-storage"]

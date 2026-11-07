@@ -49,20 +49,7 @@ type State struct {
 	Version int    `json:"version"`
 	Key     string `json:"key"`
 	// Size is the image size in bytes. Zero means the snapshot keeps the inner overlay's directory upper.
-	Size      int64      `json:"size"`
-	Reason    string     `json:"reason,omitempty"`
-	Created   time.Time  `json:"created"`
-	Container *Container `json:"container,omitempty"`
-}
-
-// Container is the container a layer was decided for, recorded for troubleshooting only.
-type Container struct {
-	Namespace    string `json:"namespace"`
-	ID           string `json:"id"`
-	PodNamespace string `json:"podNamespace,omitempty"`
-	PodName      string `json:"podName,omitempty"`
-	PodUID       string `json:"podUID,omitempty"`
-	Name         string `json:"name,omitempty"`
+	Size int64 `json:"size"`
 }
 
 // Store keeps layers under one root:
@@ -299,6 +286,7 @@ func readState(l Layer) (State, bool, error) {
 		return State{}, false, err
 	}
 	var st State
+	// Earlier versions also wrote reason, created and container: unknown fields must keep decoding.
 	if err := json.Unmarshal(data, &st); err != nil {
 		return State{}, false, fmt.Errorf("%s: %v: %w", filepath.Join(l.Dir, stateName), err, ErrCorrupt)
 	}

@@ -18,7 +18,7 @@ import (
 )
 
 // Key names the annotation. containerd's pod_annotations must list it, or it never reaches the snapshotter.
-const Key = "scitix.ai/ephemeral-storage"
+const Key = "blockoverlayfs.io/ephemeral-storage"
 
 // Value is the annotation's content: a JSON object keyed by container name, for example
 //
