@@ -205,15 +205,22 @@ func TestCreateContainer(t *testing.T) {
 	}
 }
 
-func TestCreateContainerFailsWhenTheLayerCannotBeAttached(t *testing.T) {
+func TestCreateContainerKeepsADirectoryLayerWhenTheLayerCannotBeAttached(t *testing.T) {
 	ctx := context.Background()
 	rt, layers := newFakeRuntime(), newFakeLayers()
 	rt.snapshots["ctr"] = "/snapshots/7"
 	p := New(rt, layers, sizing.Policy{DefaultSize: gi})
 
 	layers.attachErr = errors.New("mkfs failed")
-	if _, _, err := p.CreateContainer(ctx, pod(""), container("ctr", "app")); err == nil {
-		t.Error("expected an error when attaching fails")
+	adj, updates, err := p.CreateContainer(ctx, pod(""), container("ctr", "app"))
+	if err != nil {
+		t.Errorf("CreateContainer returned %v, want no error: a container that cannot get its layer runs on a directory", err)
+	}
+	if adj != nil || updates != nil {
+		t.Errorf("CreateContainer adjusted %v and updated %v, want nothing", adj, updates)
+	}
+	if l, ok := layers.get("ctr"); ok {
+		t.Errorf("got a layer %+v, want none", l)
 	}
 
 	layers.attachErr = nil

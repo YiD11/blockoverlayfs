@@ -73,8 +73,9 @@ func (p *Plugin) Synchronize(ctx context.Context, _ []*api.PodSandbox, container
 }
 
 // CreateContainer gives a new container its block writable layer. A container that declares no size, and gets no
-// default size, keeps the snapshotter's directory. So does one whose rootfs is not on the configured snapshotter.
-// Any other failure fails the container's creation: it would otherwise run without the limit it asked for.
+// default size, keeps the snapshotter's directory. So does one whose rootfs is not on the configured snapshotter,
+// and one whose layer cannot be attached: a container that cannot get its layer runs on a directory instead of
+// failing to start, and the failure is logged.
 func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	start := time.Now()
 	id := ctr.GetId()
@@ -105,7 +106,8 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		return nil, nil, fmt.Errorf("find the rootfs of container %s: %w", id, err)
 	}
 	if err := p.layers.Attach(ctx, id, dir, size.Size); err != nil {
-		return nil, nil, fmt.Errorf("attach a block writable layer of %d bytes to container %s: %w", size.Size, id, err)
+		log.G(ctx).WithFields(fields).WithError(err).Error("container keeps a directory writable layer: failed to attach its block writable layer")
+		return nil, nil, nil
 	}
 	fields["size"] = size.Size
 	fields["duration"] = time.Since(start).String()
