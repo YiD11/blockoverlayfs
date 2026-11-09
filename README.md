@@ -23,7 +23,7 @@ Only containers that kubelet creates get a block layer. Sandbox (pause) containe
 
 ## Quick start
 
-Requirements: Linux with overlayfs, ext4 and loop devices, `mkfs.ext4` (e2fsprogs), and containerd 1.7.
+Requirements: Linux with overlayfs, ext4 and loop devices, `mkfs.ext4` (e2fsprogs), and containerd with proxy-plugin support.
 
 1. Build and install the binary:
 
@@ -43,7 +43,12 @@ Requirements: Linux with overlayfs, ext4 and loop devices, `mkfs.ext4` (e2fsprog
 
    Do not add mount sandboxing such as `PrivateMounts=` to the unit. The daemon has to mount block layers in the host's mount namespace.
 
-3. Merge [deploy/containerd/config.toml](deploy/containerd/config.toml) into `/etc/containerd/config.toml`, then restart containerd. Drain the node first: only containers created after the switch use the new snapshotter.
+3. Merge the snippet matching the installed containerd version into `/etc/containerd/config.toml`, then restart containerd. Drain the node first: only containers created after the switch use the new snapshotter.
+
+   - containerd 1.7: [deploy/containerd/1.7/config.toml](deploy/containerd/1.7/config.toml)
+   - containerd 2.x: [deploy/containerd/2.x/config.toml](deploy/containerd/2.x/config.toml)
+
+   For containerd 2.x, set `snapshotter` under `io.containerd.cri.v1.images`, and set `pod_annotations` on the runtime handler under `io.containerd.cri.v1.runtime`. Append `proxy_plugins.blockoverlayfs`, then edit the existing settings rather than adding duplicate tables.
 
 4. Add the annotation to your Pods:
 

@@ -11,7 +11,7 @@ log_level = "info"
 # Used to read the record of the container that owns a snapshot: its CRI labels (kind, pod, container name) and
 # the blockoverlayfs.io/ephemeral-storage annotation of its OCI spec, which carries the container's ephemeral-storage
 # request and limit. The platform writes the annotation on the Pod, and containerd's pod_annotations setting
-# (deploy/containerd/config.toml) copies it into the spec.
+# (deploy/containerd/1.7/config.toml or deploy/containerd/2.x/config.toml) copies it into the spec.
 address = "/run/containerd/containerd.sock"
 lookup_timeout = "3s"
 
