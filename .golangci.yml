@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  enable:
+    - copyloopvar
+    - gosec
+    - misspell
+    - nolintlint
+    - unconvert
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/YiD11/blockoverlayfs

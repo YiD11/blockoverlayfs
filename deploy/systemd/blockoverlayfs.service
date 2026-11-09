@@ -1,0 +1,19 @@
+[Unit]
+Description=blockoverlayfs NRI plugin for containerd
+Documentation=https://github.com/YiD11/blockoverlayfs
+After=containerd.service local-fs.target
+# The plugin reports ready once it has registered with NRI, so the containers kubelet creates at boot get their
+# block layers.
+Before=kubelet.service
+
+# Do not add PrivateMounts=, PrivateTmp=, ProtectSystem=, ProtectHome= or MountFlags=. The block layers the plugin
+# mounts must appear in the host's mount namespace, where containerd's shims mount container rootfs.
+[Service]
+Type=notify
+ExecStartPre=-/sbin/modprobe loop
+ExecStart=/usr/local/bin/blockoverlayfs --config=/etc/blockoverlayfs/config.toml
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

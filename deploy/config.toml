@@ -1,0 +1,29 @@
+# /etc/blockoverlayfs/config.toml
+# Every key is optional. The values below are the defaults, except under [size].
+
+log_level = "info"
+
+# Holds one sparse ext4 image per container that has a block writable layer. Keep it on the filesystem that holds
+# containerd's data: kubelet watches that filesystem as the image filesystem, and the images take their space there.
+root = "/var/lib/blockoverlayfs"
+
+[nri]
+socket_path = "/var/run/nri/nri.sock"
+# Orders the plugin among NRI plugins: two digits, lower first.
+plugin_index = "10"
+
+[containerd]
+address = "/run/containerd/containerd.sock"
+namespace = "k8s.io"
+# The snapshotter CRI prepares container rootfs with, and its root directory. Containers whose runtime handler uses
+# another snapshotter keep their writable layer as it is.
+snapshotter = "overlayfs"
+snapshotter_root = "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs"
+
+[size]
+# Subtracted from a container's limit, leaving room under it for the container's logs and emptyDir volumes.
+limit_offset = "256Mi"
+# Applied to a container's request when it declares no limit. At least 100.
+request_percent = 105
+# For containers that declare nothing. Leave it out to keep such containers on plain overlay directories.
+default_size = "20Gi"

@@ -1,0 +1,9 @@
+# Optional containerd 2.x setting. NRI is on by default, and blockoverlayfs works without it.
+# Merge it into /etc/containerd/config.toml, then restart containerd.
+version = 3
+
+[plugins."io.containerd.nri.v1.nri"]
+  # How long containerd waits for an NRI plugin to handle a request. Creating a block layer (mkfs.ext4 and a loop
+  # mount) must finish within it: past it, containerd drops the plugin and creates the container without a block
+  # layer. The default is 2s.
+  plugin_request_timeout = "2s"
