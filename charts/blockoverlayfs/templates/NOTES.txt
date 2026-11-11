@@ -1,0 +1,8 @@
+The DaemonSet {{ .Release.Name }} runs the plugin on every node it selects. A Pod is ready
+once its plugin has registered with containerd:
+
+  kubectl -n {{ .Release.Namespace }} rollout status daemonset/{{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name=blockoverlayfs -o wide
+
+Containers created from now on get a block writable layer when their Pod carries the
+blockoverlayfs.io/ephemeral-storage annotation. Containers that are already running stay as they are.

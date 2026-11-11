@@ -1,0 +1,5 @@
+apiVersion: v2
+name: blockoverlayfs
+description: NRI plugin for containerd that gives each container's writable layer a size-limited ext4 image
+version: 0.1.0
+appVersion: "0.1.0"

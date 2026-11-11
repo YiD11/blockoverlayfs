@@ -1,0 +1,72 @@
+image:
+  # Build the image with `make image` and push it to a registry your nodes pull from.
+  repository: blockoverlayfs
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# The plugin's configuration. Every path is a path on the node: the chart mounts each into the plugin's container
+# at the same path, because containerd names snapshots by their paths on the node.
+config:
+  # trace, debug, info, warn, error, fatal or panic.
+  logLevel: info
+  # One sparse ext4 image per container with a block writable layer.
+  root: /var/lib/containerd/blockoverlayfs
+  nri:
+    socketPath: /var/run/nri/nri.sock
+    # Orders the plugin among NRI plugins: two digits, lower first.
+    pluginIndex: "10"
+  containerd:
+    address: /run/containerd/containerd.sock
+    namespace: k8s.io
+    # The snapshotter CRI prepares container rootfs with, and its root directory. Containers whose runtime handler
+    # uses another snapshotter keep their writable layer as it is.
+    snapshotter: overlayfs
+    snapshotterRoot: /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs
+  size:
+    # Subtracted from a container's limit, leaving room under it for the container's logs and emptyDir volumes,
+    # for example 256Mi.
+    limitOffset: "0"
+    # Applied to a container's request when it declares no limit. At least 100.
+    requestPercent: 105
+    # For containers that declare nothing, for example 20Gi. Empty keeps such containers on plain overlayfs
+    # directories.
+    defaultSize: ""
+
+# containerd's state directory, where its shims mount container rootfs. The plugin has to see those mounts.
+containerdStateDir: /run/containerd
+
+podAnnotations:
+  # Lets the plugin's own Pod start on nodes where containerd's NRI validator requires the plugin for every
+  # container, with this key as its tolerate_missing_plugins_annotation. It does nothing anywhere else.
+  blockoverlayfs.io/tolerate-missing-plugin: "true"
+podLabels: {}
+
+priorityClassName: system-node-critical
+
+nodeSelector:
+  kubernetes.io/os: linux
+
+affinity: {}
+
+# The plugin runs on every node it is not kept off by nodeSelector or affinity.
+tolerations:
+  - operator: Exists
+
+# There is no CPU limit: mkfs.ext4 runs in this container, and a throttled one misses containerd's deadline for
+# NRI requests, which leaves the container without a block layer.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+# Leave maxSurge unset. Two plugins on one node would delete the layers the other is attaching.
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+
+# How long the plugin gets to finish the layer it is attaching or removing when its Pod is deleted.
+terminationGracePeriodSeconds: 30

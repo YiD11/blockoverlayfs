@@ -1,0 +1,136 @@
+{{- $stateDir := clean .Values.containerdStateDir -}}
+{{- $socketDir := dir .Values.config.containerd.address -}}
+{{- $nriDir := dir .Values.config.nri.socketPath -}}
+{{- /* containerd's socket is in its state directory unless it was moved. */ -}}
+{{- $socketApart := not (or (eq $socketDir $stateDir) (hasPrefix (printf "%s/" $stateDir) $socketDir)) -}}
+{{- /* The file the plugin keeps while it is registered with NRI, inside its container. */ -}}
+{{- $readyFile := "/run/blockoverlayfs/ready" -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    app.kubernetes.io/name: blockoverlayfs
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: blockoverlayfs
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  updateStrategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: blockoverlayfs
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # A changed configuration replaces the Pods: the plugin reads it once, when it starts.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The plugin talks to containerd over sockets on the node and to nothing else. On the node's network its Pod
+      # starts without waiting for the CNI plugin.
+      hostNetwork: true
+      automountServiceAccountToken: false
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: blockoverlayfs
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config=/etc/blockoverlayfs/config.toml
+            - --ready-file={{ $readyFile }}
+          securityContext:
+            # Mounting, loop devices, and bidirectional mount propagation.
+            privileged: true
+          readinessProbe:
+            exec:
+              command: ["test", "-f", {{ $readyFile | quote }}]
+            periodSeconds: 5
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/blockoverlayfs
+              readOnly: true
+            # The plugin mounts the block layers under this directory, and containerd's shims, in the node's mount
+            # namespace, mount container rootfs from what is mounted there.
+            - name: snapshotter-root
+              mountPath: {{ .Values.config.containerd.snapshotterRoot }}
+              mountPropagation: Bidirectional
+            - name: images
+              mountPath: {{ .Values.config.root }}
+            # Before the plugin covers a snapshot it checks that no rootfs mounted here uses it already.
+            - name: containerd-state
+              mountPath: {{ $stateDir }}
+              mountPropagation: HostToContainer
+            {{- if $socketApart }}
+            - name: containerd-socket
+              mountPath: {{ $socketDir }}
+            {{- end }}
+            - name: nri
+              mountPath: {{ $nriDir }}
+            # The node's own, for the loop devices the kernel creates as the layers are mounted.
+            - name: dev
+              mountPath: /dev
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}
+        - name: snapshotter-root
+          hostPath:
+            path: {{ .Values.config.containerd.snapshotterRoot }}
+            type: Directory
+        - name: images
+          hostPath:
+            path: {{ .Values.config.root }}
+            type: DirectoryOrCreate
+        - name: containerd-state
+          hostPath:
+            path: {{ $stateDir }}
+            type: Directory
+        {{- if $socketApart }}
+        - name: containerd-socket
+          hostPath:
+            path: {{ $socketDir }}
+            type: Directory
+        {{- end }}
+        # The directory rather than the socket: containerd makes a new socket when it restarts.
+        - name: nri
+          hostPath:
+            path: {{ $nriDir }}
+            type: Directory
+        - name: dev
+          hostPath:
+            path: /dev
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

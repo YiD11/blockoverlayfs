@@ -1,0 +1,29 @@
+# Optional containerd 2.x settings. NRI is on by default, and blockoverlayfs works without any of them.
+# Merge what you need into /etc/containerd/config.toml on each node, then restart containerd.
+version = 3
+
+[plugins."io.containerd.nri.v1.nri"]
+  # How long containerd waits for an NRI plugin to handle a request. Creating a block layer (mkfs.ext4 and a loop
+  # mount) must finish within it: past it, containerd drops the plugin and creates the container without a block
+  # layer. The default is 2s.
+  plugin_request_timeout = "2s"
+
+  # Optional. While blockoverlayfs is not registered, containerd creates containers without block layers, and they
+  # keep running without one. It is not registered until its Pod has started on a node that just booted, while its
+  # Pod is being replaced, and for a moment after containerd restarts.
+  #
+  # With the validator below, containerd refuses to create the containers of Pods that carry the annotation
+  #
+  #   required-plugins.noderesource.dev: '["blockoverlayfs"]'
+  #
+  # while the plugin is not registered, and kubelet tries again until it is. Other Pods are created as before.
+  # [plugins."io.containerd.nri.v1.nri".default_validator]
+  #   enable = true
+
+  # To require the plugin for every container on the node instead, list it here. Pods that have to start without
+  # it then need the annotation named below, set to "true": the plugin's own Pod, which the Helm chart annotates,
+  # and on control plane nodes the static Pods, without which kubelet never learns of the plugin's Pod.
+  # [plugins."io.containerd.nri.v1.nri".default_validator]
+  #   enable = true
+  #   required_plugins = ["blockoverlayfs"]
+  #   tolerate_missing_plugins_annotation = "blockoverlayfs.io/tolerate-missing-plugin"
