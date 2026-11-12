@@ -14,6 +14,8 @@ data:
   config.toml: |
     log_level = {{ .logLevel | quote }}
     root = {{ .root | quote }}
+    included_namespaces = {{ .includedNamespaces | default list | toJson }}
+    excluded_namespaces = {{ .excludedNamespaces | default list | toJson }}
 
     [nri]
     socket_path = {{ .nri.socketPath | quote }}

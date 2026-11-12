@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -30,6 +31,9 @@ type Plugin struct {
 	runtime *containerd.Client
 	layers  *block.Store
 	policy  sizing.Policy
+	// included and excluded are Kubernetes namespaces: see CreateContainer.
+	included []string
+	excluded []string
 
 	locks keyedLocker
 	kick  chan struct{}
@@ -47,11 +51,13 @@ type Plugin struct {
 	creating map[string]struct{}
 }
 
-func New(runtime *containerd.Client, layers *block.Store, policy sizing.Policy) *Plugin {
+func New(runtime *containerd.Client, layers *block.Store, policy sizing.Policy, included, excluded []string) *Plugin {
 	return &Plugin{
 		runtime:  runtime,
 		layers:   layers,
 		policy:   policy,
+		included: included,
+		excluded: excluded,
 		kick:     make(chan struct{}, 1),
 		creating: map[string]struct{}{},
 	}
@@ -85,6 +91,19 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	start := time.Now()
 	id := ctr.GetId()
 	fields := containerFields(pod, ctr)
+
+	// Exclusion wins over inclusion.
+	namespace := pod.GetNamespace()
+	if slices.Contains(p.excluded, namespace) {
+		fields["reason"] = "namespace is excluded"
+		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
+		return nil, nil, nil
+	}
+	if len(p.included) > 0 && !slices.Contains(p.included, namespace) {
+		fields["reason"] = "namespace is not included"
+		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
+		return nil, nil, nil
+	}
 
 	res, note := declaration(ctx, pod, ctr)
 	size, err := p.policy.Size(res)

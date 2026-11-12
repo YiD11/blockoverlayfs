@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/YiD11/blockoverlayfs/pkg/sizing"
@@ -20,14 +21,16 @@ func writeConfig(t *testing.T, content string) string {
 }
 
 func TestLoadKeepsTheDefaultsAFileDoesNotSet(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "log_level = \"debug\"\n[size]\ndefault_size = \"20Gi\"\n"))
+	cfg, err := Load(writeConfig(t, "log_level = \"debug\"\nincluded_namespaces = [\"a\", \"b\"]\nexcluded_namespaces = [\"c\"]\n[size]\ndefault_size = \"20Gi\"\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Default()
 	want.LogLevel = "debug"
+	want.IncludedNamespaces = []string{"a", "b"}
+	want.ExcludedNamespaces = []string{"c"}
 	want.Size.DefaultSize = "20Gi"
-	if cfg != want {
+	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load = %+v, want %+v", cfg, want)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -53,6 +56,8 @@ func TestValidate(t *testing.T) {
 		modify func(*Config)
 	}{
 		{name: "relative root", modify: func(c *Config) { c.Root = "var/lib/blockoverlayfs" }},
+		{name: "an empty included namespace", modify: func(c *Config) { c.IncludedNamespaces = []string{"a", ""} }},
+		{name: "an empty excluded namespace", modify: func(c *Config) { c.ExcludedNamespaces = []string{""} }},
 		{name: "relative NRI socket", modify: func(c *Config) { c.NRI.SocketPath = "nri.sock" }},
 		{name: "one-digit plugin index", modify: func(c *Config) { c.NRI.PluginIndex = "1" }},
 		{name: "no containerd address", modify: func(c *Config) { c.Containerd.Address = "" }},

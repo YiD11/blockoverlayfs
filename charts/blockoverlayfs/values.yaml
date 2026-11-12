@@ -14,6 +14,10 @@ config:
   logLevel: info
   # One sparse ext4 image per container with a block writable layer.
   root: /var/lib/containerd/blockoverlayfs
+  # Kubernetes namespaces whose Pods get block layers. Empty means every namespace.
+  includedNamespaces: []
+  # Kubernetes namespaces whose Pods keep plain overlayfs directories, even if also listed in includedNamespaces.
+  excludedNamespaces: []
   nri:
     socketPath: /var/run/nri/nri.sock
     # Orders the plugin among NRI plugins: two digits, lower first.

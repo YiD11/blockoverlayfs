@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -41,11 +42,15 @@ var (
 )
 
 type Config struct {
-	LogLevel   string           `toml:"log_level"`
-	Root       string           `toml:"root"`
-	NRI        NRIConfig        `toml:"nri"`
-	Containerd ContainerdConfig `toml:"containerd"`
-	Size       SizeConfig       `toml:"size"`
+	LogLevel string `toml:"log_level"`
+	Root     string `toml:"root"`
+	// IncludedNamespaces and ExcludedNamespaces name Kubernetes namespaces of Pods. A container gets a block layer
+	// only if its Pod's namespace is not excluded and, when IncludedNamespaces is not empty, is included.
+	IncludedNamespaces []string         `toml:"included_namespaces"`
+	ExcludedNamespaces []string         `toml:"excluded_namespaces"`
+	NRI                NRIConfig        `toml:"nri"`
+	Containerd         ContainerdConfig `toml:"containerd"`
+	Size               SizeConfig       `toml:"size"`
 }
 
 // NRIConfig is how the plugin connects to containerd's NRI.
@@ -111,6 +116,13 @@ func Load(path string) (Config, error) {
 func (c Config) Validate() error {
 	if !filepath.IsAbs(c.Root) {
 		return fmt.Errorf("root %q must be an absolute path", c.Root)
+	}
+	// An empty name matches no Pod, and one in included_namespaces would keep every Pod out.
+	if slices.Contains(c.IncludedNamespaces, "") {
+		return errors.New("included_namespaces must not hold an empty name")
+	}
+	if slices.Contains(c.ExcludedNamespaces, "") {
+		return errors.New("excluded_namespaces must not hold an empty name")
 	}
 	if !filepath.IsAbs(c.NRI.SocketPath) {
 		return fmt.Errorf("nri.socket_path %q must be an absolute path", c.NRI.SocketPath)

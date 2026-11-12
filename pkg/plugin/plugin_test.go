@@ -183,7 +183,7 @@ func newPlugin(t *testing.T, rt *fakeRuntime, layers *fakeLayers, policy sizing.
 		mocker := mockey.Mock(m.target).To(m.hook).Build()
 		t.Cleanup(func() { mocker.UnPatch() })
 	}
-	return New(&containerd.Client{}, &block.Store{}, policy)
+	return New(&containerd.Client{}, &block.Store{}, policy, nil, nil)
 }
 
 // runReconciler runs the plugin's reconciler until the test ends, and waits for it to return: it has to be gone
@@ -248,6 +248,38 @@ func TestCreateContainer(t *testing.T) {
 				}
 			} else if !ok || l.size != tc.size || l.dir != "/snapshots/7" || !l.mounted {
 				t.Errorf("layer = %+v, %v; want %d bytes mounted at /snapshots/7", l, ok, tc.size)
+			}
+		})
+	}
+}
+
+func TestCreateContainerFiltersByNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		included []string
+		excluded []string
+		layer    bool
+	}{
+		{name: "no lists", layer: true},
+		{name: "included", included: []string{"other", "default"}, layer: true},
+		{name: "not included", included: []string{"other"}},
+		{name: "excluded", excluded: []string{"other", "default"}},
+		{name: "not excluded", excluded: []string{"other"}, layer: true},
+		{name: "included and excluded", included: []string{"default"}, excluded: []string{"default"}},
+		{name: "included and another excluded", included: []string{"default"}, excluded: []string{"other"}, layer: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, layers := newFakeRuntime(), newFakeLayers()
+			rt.snapshots["ctr"] = "/snapshots/7"
+			// The default size gives every container that is not filtered out a layer.
+			p := newPlugin(t, rt, layers, sizing.Policy{DefaultSize: gi})
+			p.included, p.excluded = tc.included, tc.excluded
+
+			if _, _, err := p.CreateContainer(context.Background(), pod(""), container("ctr", "app")); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := layers.get("ctr"); ok != tc.layer {
+				t.Errorf("layer = %v, want %v", ok, tc.layer)
 			}
 		})
 	}

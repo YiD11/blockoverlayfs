@@ -115,8 +115,12 @@ func run() error {
 		"request_percent": policy.RequestPercent,
 		"default_size":    policy.DefaultSize,
 	}).Info("size policy")
+	log.G(ctx).WithFields(log.Fields{
+		"included_namespaces": cfg.IncludedNamespaces,
+		"excluded_namespaces": cfg.ExcludedNamespaces,
+	}).Info("namespaces")
 
-	p := plugin.New(runtime, layers, policy)
+	p := plugin.New(runtime, layers, policy, cfg.IncludedNamespaces, cfg.ExcludedNamespaces)
 	var reconciler sync.WaitGroup
 	reconciler.Go(func() { p.RunReconciler(ctx, reconcileInterval, reconcileRetry) })
 	// Clear away what a node restart or an earlier run left behind before the first container asks for a layer.
