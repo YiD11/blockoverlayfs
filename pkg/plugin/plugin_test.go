@@ -9,11 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bytedance/mockey"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/nri/pkg/api"
 
 	"github.com/YiD11/blockoverlayfs/pkg/annotation"
 	"github.com/YiD11/blockoverlayfs/pkg/block"
+	"github.com/YiD11/blockoverlayfs/pkg/containerd"
 	"github.com/YiD11/blockoverlayfs/pkg/sizing"
 )
 
@@ -165,6 +167,41 @@ func (f *fakeLayers) put(id string, l fakeLayer) {
 	f.layers[id] = &l
 }
 
+// newPlugin returns a plugin whose calls to containerd and to the block store go to rt and layers until the test
+// ends. The calls are replaced at run time, which needs -gcflags="all=-N -l".
+func newPlugin(t *testing.T, rt *fakeRuntime, layers *fakeLayers, policy sizing.Policy) *Plugin {
+	t.Helper()
+	for _, m := range []struct{ target, hook any }{
+		{(*containerd.Client).SnapshotDir, rt.SnapshotDir},
+		{(*containerd.Client).ContainerExists, rt.ContainerExists},
+		{(*block.Store).Attach, layers.Attach},
+		{(*block.Store).Status, layers.Status},
+		{(*block.Store).Unmount, layers.Unmount},
+		{(*block.Store).Remove, layers.Remove},
+		{(*block.Store).IDs, layers.IDs},
+	} {
+		mocker := mockey.Mock(m.target).To(m.hook).Build()
+		t.Cleanup(func() { mocker.UnPatch() })
+	}
+	return New(&containerd.Client{}, &block.Store{}, policy)
+}
+
+// runReconciler runs the plugin's reconciler until the test ends, and waits for it to return: it has to be gone
+// before newPlugin gives the calls back.
+func runReconciler(t *testing.T, p *Plugin, interval, retry time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.RunReconciler(ctx, interval, retry)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+}
+
 func pod(value string) *api.PodSandbox {
 	p := &api.PodSandbox{Id: "pod-id", Name: "web", Namespace: "default"}
 	if value != "" {
@@ -199,7 +236,7 @@ func TestCreateContainer(t *testing.T) {
 			if !tc.elsewhere {
 				rt.snapshots["ctr"] = "/snapshots/7"
 			}
-			p := New(rt, layers, tc.policy)
+			p := newPlugin(t, rt, layers, tc.policy)
 
 			if _, _, err := p.CreateContainer(context.Background(), pod(tc.annotation), container("ctr", "app")); err != nil {
 				t.Fatal(err)
@@ -220,7 +257,7 @@ func TestCreateContainerKeepsADirectoryLayerWhenTheLayerCannotBeAttached(t *test
 	ctx := context.Background()
 	rt, layers := newFakeRuntime(), newFakeLayers()
 	rt.snapshots["ctr"] = "/snapshots/7"
-	p := New(rt, layers, sizing.Policy{DefaultSize: gi})
+	p := newPlugin(t, rt, layers, sizing.Policy{DefaultSize: gi})
 
 	layers.attachErr = errors.New("mkfs failed")
 	if _, _, err := p.CreateContainer(ctx, pod(""), container("ctr", "app")); err != nil {
@@ -241,7 +278,7 @@ func TestRemoveContainerUnmountsAndDeletesTheLayer(t *testing.T) {
 	ctx := context.Background()
 	rt, layers := newFakeRuntime(), newFakeLayers()
 	rt.snapshots["ctr"] = "/snapshots/7"
-	p := New(rt, layers, sizing.Policy{DefaultSize: gi})
+	p := newPlugin(t, rt, layers, sizing.Policy{DefaultSize: gi})
 	if _, _, err := p.CreateContainer(ctx, pod(""), container("ctr", "app")); err != nil {
 		t.Fatal(err)
 	}
@@ -262,9 +299,9 @@ func TestRemoveContainerUnmountsAndDeletesTheLayer(t *testing.T) {
 }
 
 // synchronized returns a plugin that containerd has synchronized, as it does when the plugin registers.
-func synchronized(t *testing.T, rt Runtime, layers Layers) *Plugin {
+func synchronized(t *testing.T, rt *fakeRuntime, layers *fakeLayers) *Plugin {
 	t.Helper()
-	p := New(rt, layers, sizing.Policy{DefaultSize: gi})
+	p := newPlugin(t, rt, layers, sizing.Policy{DefaultSize: gi})
 	if _, err := p.Synchronize(context.Background(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +340,7 @@ func TestReconcileLeavesAttachedLayersUntilContainerdSynchronizesThePlugin(t *te
 	rt, layers := newFakeRuntime(), newFakeLayers()
 	// An earlier run attached this layer just before it stopped: containerd may not have recorded the container yet.
 	layers.put("ctr", fakeLayer{mounted: true})
-	p := New(rt, layers, sizing.Policy{})
+	p := newPlugin(t, rt, layers, sizing.Policy{})
 
 	if p.Reconcile(ctx) {
 		t.Error("Reconcile reported the layer as settled")
@@ -406,14 +443,12 @@ func TestReconcileKeepsAttachedLayersWhenContainerdCannotAnswer(t *testing.T) {
 }
 
 func TestSynchronizeReconcilesInTheBackground(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	rt, layers := newFakeRuntime(), newFakeLayers()
 	layers.put("removed", fakeLayer{mounted: true})
-	p := New(rt, layers, sizing.Policy{})
-	go p.RunReconciler(ctx, time.Hour, time.Hour)
+	p := newPlugin(t, rt, layers, sizing.Policy{})
+	runReconciler(t, p, time.Hour, time.Hour)
 
-	if _, err := p.Synchronize(ctx, nil, nil); err != nil {
+	if _, err := p.Synchronize(context.Background(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "Synchronize to reconcile", func() bool {
@@ -423,13 +458,11 @@ func TestSynchronizeReconcilesInTheBackground(t *testing.T) {
 }
 
 func TestRunReconcilerLooksAgainSoonAfterAnUnsettledRun(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	rt, layers := newFakeRuntime(), newFakeLayers()
 	rt.err = errors.New("containerd is restarting")
 	layers.put("removed", fakeLayer{mounted: true})
 	p := synchronized(t, rt, layers)
-	go p.RunReconciler(ctx, time.Hour, 10*time.Millisecond)
+	runReconciler(t, p, time.Hour, 10*time.Millisecond)
 
 	waitFor(t, "the first run", func() bool { return rt.askedCount() > 0 })
 	rt.fail(nil)
@@ -446,7 +479,7 @@ func TestDrainWaitsForTheRequestBeingHandled(t *testing.T) {
 	rt.snapshots["ctr"] = "/snapshots/7"
 	rt.snapshots["late"] = "/snapshots/8"
 	layers.attaching, layers.release = make(chan string), make(chan struct{})
-	p := New(rt, layers, sizing.Policy{})
+	p := newPlugin(t, rt, layers, sizing.Policy{})
 
 	created := make(chan error, 1)
 	go func() {
@@ -517,19 +550,19 @@ func TestKeyedLockerSerializesOneKey(t *testing.T) {
 	// Another key is not held up.
 	k.lock("b")()
 
-	locked := make(chan struct{})
+	// The key is locked a second time, and unlocked again.
+	done := make(chan struct{})
 	go func() {
-		unlock := k.lock("a")
-		close(locked)
-		unlock()
+		k.lock("a")()
+		close(done)
 	}()
 	select {
-	case <-locked:
+	case <-done:
 		t.Fatal("a second lock of the same key did not wait")
 	case <-time.After(50 * time.Millisecond):
 	}
 	unlockA()
-	<-locked
+	<-done
 
 	k.mu.Lock()
 	defer k.mu.Unlock()

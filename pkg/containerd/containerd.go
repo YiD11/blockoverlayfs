@@ -4,7 +4,6 @@ package containerd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -14,7 +13,6 @@ import (
 
 	containersapi "github.com/containerd/containerd/api/services/containers/v1"
 	snapshotsapi "github.com/containerd/containerd/api/services/snapshots/v1"
-	"github.com/containerd/containerd/api/types"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/errdefs/pkg/errgrpc"
 	"google.golang.org/grpc"
@@ -67,6 +65,11 @@ func (c *Client) Close() error { return c.conn.Close() }
 // SnapshotDir returns the directory in which the snapshotter keeps the upper and work directories of a container's
 // rootfs. CRI names that snapshot after the container. The error satisfies errdefs.IsNotFound when the snapshotter
 // has no such snapshot, as for a container whose runtime handler uses another snapshotter.
+//
+// containerd's overlayfs snapshotter keeps every snapshot as <root>/snapshots/<numeric ID>, holding the upper
+// directory fs and the work directory work. An active snapshot with parents mounts as an overlay naming both, one
+// without parents as a writable bind mount of its upper directory. Anything else, or a directory anywhere else, is
+// refused: the plugin mounts over the directory returned.
 func (c *Client) SnapshotDir(ctx context.Context, id string) (string, error) {
 	ctx, cancel := c.context(ctx)
 	defer cancel()
@@ -74,45 +77,10 @@ func (c *Client) SnapshotDir(ctx context.Context, id string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get the mounts of snapshot %s from %s: %w", id, c.opts.Snapshotter, errgrpc.ToNative(err))
 	}
-	dir, err := SnapshotDir(c.opts.SnapshotterRoot, resp.GetMounts())
-	if err != nil {
-		return "", fmt.Errorf("snapshot %s of %s: %w", id, c.opts.Snapshotter, err)
-	}
-	return dir, nil
-}
-
-// ContainerExists reports whether containerd still has a container.
-func (c *Client) ContainerExists(ctx context.Context, id string) (bool, error) {
-	ctx, cancel := c.context(ctx)
-	defer cancel()
-	_, err := c.containers.Get(ctx, &containersapi.GetContainerRequest{ID: id})
-	return exists(err)
-}
-
-func (c *Client) context(ctx context.Context) (context.Context, context.CancelFunc) {
-	ctx = metadata.AppendToOutgoingContext(ctx, namespaceHeader, c.opts.Namespace)
-	return context.WithTimeout(ctx, callTimeout)
-}
-
-func exists(err error) (bool, error) {
-	if err == nil {
-		return true, nil
-	}
-	err = errgrpc.ToNative(err)
-	if errdefs.IsNotFound(err) {
-		return false, nil
-	}
-	return false, err
-}
-
-// SnapshotDir finds the snapshot directory in the mounts of an active snapshot of containerd's overlayfs
-// snapshotter, which keeps every snapshot as <root>/snapshots/<numeric ID> holding the upper directory fs and the
-// work directory work. An active snapshot with parents mounts as an overlay naming both, one without parents as a
-// writable bind mount of its upper directory. Anything else, or a directory anywhere else, is refused: the plugin
-// mounts over the directory it returns.
-func SnapshotDir(root string, mounts []*types.Mount) (string, error) {
+	name := fmt.Sprintf("snapshot %s of %s", id, c.opts.Snapshotter)
+	mounts := resp.GetMounts()
 	if len(mounts) != 1 {
-		return "", fmt.Errorf("want one mount, got %d", len(mounts))
+		return "", fmt.Errorf("%s: want one mount, got %d", name, len(mounts))
 	}
 	m := mounts[0]
 	var upper, work string
@@ -126,24 +94,43 @@ func SnapshotDir(root string, mounts []*types.Mount) (string, error) {
 			}
 		}
 		if upper == "" || work == "" {
-			return "", errors.New("an overlay mount without upperdir and workdir is not a container's rootfs")
+			return "", fmt.Errorf("%s: an overlay mount without upperdir and workdir is not a container's rootfs", name)
 		}
 	case "bind":
 		if !slices.Contains(m.GetOptions(), "rw") {
-			return "", errors.New("a read-only bind mount is not a container's rootfs")
+			return "", fmt.Errorf("%s: a read-only bind mount is not a container's rootfs", name)
 		}
 		upper = m.GetSource()
 	default:
-		return "", fmt.Errorf("unsupported mount type %q", m.GetType())
+		return "", fmt.Errorf("%s: unsupported mount type %q", name, m.GetType())
 	}
 
 	dir := filepath.Dir(upper)
 	if upper != filepath.Join(dir, "fs") || (work != "" && work != filepath.Join(dir, "work")) {
-		return "", fmt.Errorf("upper directory %q and work directory %q are not fs and work of one snapshot directory", upper, work)
+		return "", fmt.Errorf("%s: upper directory %q and work directory %q are not fs and work of one snapshot directory", name, upper, work)
 	}
-	snapshots := filepath.Join(root, "snapshots")
+	snapshots := filepath.Join(c.opts.SnapshotterRoot, "snapshots")
 	if _, err := strconv.ParseUint(filepath.Base(dir), 10, 64); filepath.Dir(dir) != snapshots || err != nil {
-		return "", fmt.Errorf("%s is not a snapshot directory of %s", dir, snapshots)
+		return "", fmt.Errorf("%s: %s is not a snapshot directory of %s", name, dir, snapshots)
 	}
 	return dir, nil
+}
+
+// ContainerExists reports whether containerd still has a container.
+func (c *Client) ContainerExists(ctx context.Context, id string) (bool, error) {
+	ctx, cancel := c.context(ctx)
+	defer cancel()
+	_, err := c.containers.Get(ctx, &containersapi.GetContainerRequest{ID: id})
+	if err == nil {
+		return true, nil
+	}
+	if err = errgrpc.ToNative(err); errdefs.IsNotFound(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (c *Client) context(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx = metadata.AppendToOutgoingContext(ctx, namespaceHeader, c.opts.Namespace)
+	return context.WithTimeout(ctx, callTimeout)
 }

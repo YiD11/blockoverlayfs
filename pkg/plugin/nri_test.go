@@ -51,7 +51,7 @@ func TestPluginOverNRI(t *testing.T) {
 
 	rt, layers := newFakeRuntime(), newFakeLayers()
 	rt.snapshots["ctr"] = "/snapshots/7"
-	p := New(rt, layers, sizing.Policy{})
+	p := newPlugin(t, rt, layers, sizing.Policy{})
 	s, err := stub.New(p, stub.WithPluginName("blockoverlayfs"), stub.WithPluginIdx("10"), stub.WithSocketPath(socket))
 	if err != nil {
 		t.Fatal(err)

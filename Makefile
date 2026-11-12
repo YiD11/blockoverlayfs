@@ -44,7 +44,7 @@ image:
 	$(CONTAINER_TOOL) build --build-arg VERSION=$(VERSION) --build-arg REVISION=$(REVISION) -t $(IMAGE) .
 
 test:
-	$(GO) test ./...
+	$(GO) test -gcflags="all=-N -l" ./...
 
 # Only pkg/block defines -test.root. The race detector needs cgo; set ROOT_TESTFLAGS= to run without it.
 ROOT_TESTFLAGS ?= -race

@@ -25,7 +25,7 @@ func TestSnapshotDir(t *testing.T) {
 	overlay := func(options ...string) []*types.Mount {
 		return []*types.Mount{{Type: "overlay", Source: "overlay", Options: options}}
 	}
-	for _, tc := range []struct {
+	cases := []struct {
 		name   string
 		mounts []*types.Mount
 		want   string
@@ -57,12 +57,20 @@ func TestSnapshotDir(t *testing.T) {
 		{name: "another mount type", mounts: []*types.Mount{{Type: "erofs", Source: dir + "/layer.erofs"}}},
 		{name: "two mounts", mounts: append(overlay("workdir="+dir+"/work", "upperdir="+dir+"/fs"), overlay()...)},
 		{name: "no mounts"},
-	} {
+	}
+	// Each case is a snapshot named after it.
+	f := &fakeContainerd{namespace: "k8s.io", snapshots: map[string][]*types.Mount{}}
+	for _, tc := range cases {
+		f.snapshots["overlayfs/"+tc.name] = tc.mounts
+	}
+	c := serve(t, f)
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := SnapshotDir(root, tc.mounts)
+			got, err := c.SnapshotDir(context.Background(), tc.name)
 			if tc.want == "" {
-				if err == nil {
-					t.Fatalf("SnapshotDir = %q, want an error", got)
+				// A snapshot that is refused must not read as one the snapshotter does not have.
+				if err == nil || errdefs.IsNotFound(err) {
+					t.Fatalf("SnapshotDir = %q, %v; want a refusal", got, err)
 				}
 				return
 			}

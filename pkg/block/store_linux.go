@@ -86,26 +86,31 @@ func (s *Store) Attach(ctx context.Context, id, dir string, size int64) error {
 	if err := os.Remove(img); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove stale image %s: %w", img, err)
 	}
+	shouldRemoveImage := true
+	defer func() {
+		if shouldRemoveImage {
+			_ = os.Remove(img)
+		}
+	}()
 	if err := createImage(ctx, img, size); err != nil {
-		_ = os.Remove(img)
 		return err
 	}
 	// Past the request's deadline containerd creates the container without this layer.
 	if err := ctx.Err(); err != nil {
-		_ = os.Remove(img)
 		return fmt.Errorf("attach image %s: %w", img, err)
 	}
 	if err := mountImage(img, dir); err != nil {
-		_ = os.Remove(img)
 		return err
 	}
 	if err := complete(ctx, dir, attrs); err != nil {
 		if uerr := unmountAll([]string{dir}); uerr != nil {
+			// unmounted failed, image should stay
+			shouldRemoveImage = false
 			return errors.Join(err, uerr)
 		}
-		_ = os.Remove(img)
 		return err
 	}
+	shouldRemoveImage = false
 	return nil
 }
 

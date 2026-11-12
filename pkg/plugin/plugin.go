@@ -17,39 +17,18 @@ import (
 
 	"github.com/YiD11/blockoverlayfs/pkg/annotation"
 	"github.com/YiD11/blockoverlayfs/pkg/block"
+	"github.com/YiD11/blockoverlayfs/pkg/containerd"
 	"github.com/YiD11/blockoverlayfs/pkg/sizing"
 )
 
 // errDraining answers the requests that arrive once the plugin has begun to stop.
 var errDraining = errors.New("the plugin is stopping")
 
-// Runtime is what the plugin reads from containerd.
-type Runtime interface {
-	// SnapshotDir returns the directory of a container's rootfs snapshot. The error satisfies errdefs.IsNotFound
-	// when the configured snapshotter has no snapshot for the container.
-	SnapshotDir(ctx context.Context, id string) (string, error)
-	ContainerExists(ctx context.Context, id string) (bool, error)
-}
-
-// Layers keeps the block writable layers, one image per container.
-type Layers interface {
-	// Attach mounts a new layer of size bytes over a container's snapshot directory.
-	Attach(ctx context.Context, id, dir string, size int64) error
-	// Status reports whether a container's image is its writable layer, or what is left of one.
-	Status(id string) (block.Status, error)
-	// Unmount takes a container's image off wherever it is mounted.
-	Unmount(id string) error
-	// Remove deletes a container's image, refusing while it is mounted, and reports whether there was one.
-	Remove(id string) (removed bool, err error)
-	// IDs lists the containers that have an image, mounted or not.
-	IDs() ([]string, error)
-}
-
 // Plugin handles NRI's Synchronize, CreateContainer and RemoveContainer. NRI serializes these; the plugin also
 // reconciles in the background, and a lock per container keeps the two apart.
 type Plugin struct {
-	runtime Runtime
-	layers  Layers
+	runtime *containerd.Client
+	layers  *block.Store
 	policy  sizing.Policy
 
 	locks keyedLocker
@@ -68,7 +47,7 @@ type Plugin struct {
 	creating map[string]struct{}
 }
 
-func New(runtime Runtime, layers Layers, policy sizing.Policy) *Plugin {
+func New(runtime *containerd.Client, layers *block.Store, policy sizing.Policy) *Plugin {
 	return &Plugin{
 		runtime:  runtime,
 		layers:   layers,

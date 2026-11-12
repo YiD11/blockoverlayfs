@@ -3,6 +3,7 @@ module github.com/YiD11/blockoverlayfs
 go 1.25.0
 
 require (
+	github.com/bytedance/mockey v1.4.8
 	github.com/containerd/containerd/api v1.10.0
 	github.com/containerd/containerd/v2 v2.2.1
 	github.com/containerd/errdefs v1.0.0
@@ -27,6 +28,8 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
+	github.com/gopherjs/gopherjs v1.12.80 // indirect
+	github.com/jtolds/gls v4.20.0+incompatible // indirect
 	github.com/knqyf263/go-plugin v0.9.0 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/moby/sys/userns v0.1.0 // indirect
@@ -36,11 +39,14 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
+	github.com/smartystreets/assertions v1.2.0 // indirect
+	github.com/smartystreets/goconvey v1.7.2 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/tetratelabs/wazero v1.10.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opencensus.io v0.24.0 // indirect
+	golang.org/x/arch v0.23.0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
 	golang.org/x/text v0.31.0 // indirect
