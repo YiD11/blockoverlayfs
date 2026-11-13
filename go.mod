@@ -10,6 +10,7 @@ require (
 	github.com/containerd/errdefs/pkg v0.3.0
 	github.com/containerd/log v0.1.0
 	github.com/containerd/nri v0.11.0
+	github.com/containerd/ttrpc v1.2.7
 	github.com/moby/sys/mountinfo v0.7.3
 	github.com/pelletier/go-toml/v2 v2.4.3
 	golang.org/x/sys v0.38.0
@@ -22,7 +23,6 @@ require (
 	github.com/Microsoft/hcsshim v0.14.0-rc.1 // indirect
 	github.com/containerd/cgroups/v3 v3.1.2 // indirect
 	github.com/containerd/continuity v0.4.5 // indirect
-	github.com/containerd/ttrpc v1.2.7 // indirect
 	github.com/containerd/typeurl/v2 v2.2.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect

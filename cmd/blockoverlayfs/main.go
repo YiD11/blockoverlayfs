@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -147,21 +148,21 @@ func loadConfig() (config.Config, error) {
 // and when the plugin misses the deadline of a request; the plugin then registers again, and Synchronize reconciles
 // what happened meanwhile. ready says whether the plugin is registered.
 func serve(ctx context.Context, p *plugin.Plugin, cfg config.NRIConfig, ready readiness) error {
-	s, err := stub.New(p,
-		stub.WithPluginName(pluginName),
-		stub.WithPluginIdx(cfg.PluginIndex),
-		stub.WithSocketPath(cfg.SocketPath),
+	var (
+		mu sync.Mutex
+		s stub.Stub
 	)
-	if err != nil {
-		return fmt.Errorf("create the NRI plugin: %w", err)
-	}
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
 		<-ctx.Done()
 		// The request being handled finishes its layer before the connection goes.
 		p.Drain()
-		s.Stop()
+		mu.Lock()
+		defer mu.Unlock()
+		if s != nil {
+			s.Stop()
+		}
 	}()
 	// Requests outlive the signal that stops the plugin: containerd's own deadline ends them.
 	serving := context.WithoutCancel(ctx)
@@ -172,7 +173,24 @@ func serve(ctx context.Context, p *plugin.Plugin, cfg config.NRIConfig, ready re
 		since time.Time
 	)
 	for ctx.Err() == nil {
-		err := s.Start(serving)
+		conn, err := net.Dial("unix", cfg.SocketPath)
+		if err == nil {
+			var next stub.Stub
+			next, err = stub.New(p,
+				stub.WithPluginName(pluginName),
+				stub.WithPluginIdx(cfg.PluginIndex),
+				stub.WithConnection(conn),
+			)
+			if err != nil {
+				_ = conn.Close()
+				return fmt.Errorf("create the NRI plugin: %w", err)
+			}
+			mu.Lock()
+			s = next
+			mu.Unlock()
+			// A stub that fails to start closes the connection.
+			err = next.Start(serving)
+		}
 		if err == nil {
 			if ctx.Err() != nil {
 				// Stopped before it had started: nothing else will stop it.
