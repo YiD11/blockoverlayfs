@@ -12,6 +12,7 @@ import (
 	"github.com/bytedance/mockey"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/nri/pkg/api"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/YiD11/blockoverlayfs/pkg/annotation"
 	"github.com/YiD11/blockoverlayfs/pkg/block"
@@ -183,7 +184,7 @@ func newPlugin(t *testing.T, rt *fakeRuntime, layers *fakeLayers, policy sizing.
 		mocker := mockey.Mock(m.target).To(m.hook).Build()
 		t.Cleanup(func() { mocker.UnPatch() })
 	}
-	return New(&containerd.Client{}, &block.Store{}, policy, nil, nil)
+	return New(&containerd.Client{}, &block.Store{}, policy, nil, nil, labels.Everything())
 }
 
 // runReconciler runs the plugin's reconciler until the test ends, and waits for it to return: it has to be gone
@@ -276,6 +277,41 @@ func TestCreateContainerFiltersByNamespace(t *testing.T) {
 			p.included, p.excluded = tc.included, tc.excluded
 
 			if _, _, err := p.CreateContainer(context.Background(), pod(""), container("ctr", "app")); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := layers.get("ctr"); ok != tc.layer {
+				t.Errorf("layer = %v, want %v", ok, tc.layer)
+			}
+		})
+	}
+}
+
+func TestCreateContainerFiltersByLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		selector string
+		labels   map[string]string
+		layer    bool
+	}{
+		{name: "the empty selector", labels: map[string]string{"skip": "true"}, layer: true},
+		{name: "not selected", selector: "skip!=true", labels: map[string]string{"app": "web", "skip": "true"}},
+		{name: "selected", selector: "skip!=true", labels: map[string]string{"skip": "false"}, layer: true},
+		{name: "selected without labels", selector: "skip!=true", layer: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, layers := newFakeRuntime(), newFakeLayers()
+			rt.snapshots["ctr"] = "/snapshots/7"
+			// The default size gives every container that is not filtered out a layer.
+			p := newPlugin(t, rt, layers, sizing.Policy{DefaultSize: gi})
+			selector, err := labels.Parse(tc.selector)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.podSelector = selector
+			sandbox := pod("")
+			sandbox.Labels = tc.labels
+
+			if _, _, err := p.CreateContainer(context.Background(), sandbox, container("ctr", "app")); err != nil {
 				t.Fatal(err)
 			}
 			if _, ok := layers.get("ctr"); ok != tc.layer {

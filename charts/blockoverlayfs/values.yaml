@@ -18,6 +18,12 @@ config:
   includedNamespaces: []
   # Kubernetes namespaces whose Pods keep plain overlayfs directories, even if also listed in includedNamespaces.
   excludedNamespaces: []
+  # A Kubernetes label selector, with matchLabels and matchExpressions. Pods it does not select keep plain
+  # overlayfs directories. Empty selects every Pod.
+  podSelector: {}
+  # podSelector:
+  #   matchExpressions:
+  #     - {key: blockoverlayfs.io/skip, operator: NotIn, values: ["true"]}
   nri:
     socketPath: /var/run/nri/nri.sock
     # Orders the plugin among NRI plugins: two digits, lower first.

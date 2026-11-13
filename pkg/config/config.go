@@ -12,6 +12,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/YiD11/blockoverlayfs/pkg/sizing"
 )
@@ -46,11 +47,14 @@ type Config struct {
 	Root     string `toml:"root"`
 	// IncludedNamespaces and ExcludedNamespaces name Kubernetes namespaces of Pods. A container gets a block layer
 	// only if its Pod's namespace is not excluded and, when IncludedNamespaces is not empty, is included.
-	IncludedNamespaces []string         `toml:"included_namespaces"`
-	ExcludedNamespaces []string         `toml:"excluded_namespaces"`
-	NRI                NRIConfig        `toml:"nri"`
-	Containerd         ContainerdConfig `toml:"containerd"`
-	Size               SizeConfig       `toml:"size"`
+	IncludedNamespaces []string `toml:"included_namespaces"`
+	ExcludedNamespaces []string `toml:"excluded_namespaces"`
+	// PodSelector selects Pods by their labels. A container gets a block layer only if its Pod is selected. The
+	// empty selector selects every Pod.
+	PodSelector metav1.LabelSelector `toml:"pod_selector"`
+	NRI         NRIConfig            `toml:"nri"`
+	Containerd  ContainerdConfig     `toml:"containerd"`
+	Size        SizeConfig           `toml:"size"`
 }
 
 // NRIConfig is how the plugin connects to containerd's NRI.
@@ -123,6 +127,9 @@ func (c Config) Validate() error {
 	}
 	if slices.Contains(c.ExcludedNamespaces, "") {
 		return errors.New("excluded_namespaces must not hold an empty name")
+	}
+	if _, err := metav1.LabelSelectorAsSelector(&c.PodSelector); err != nil {
+		return fmt.Errorf("pod_selector: %w", err)
 	}
 	if !filepath.IsAbs(c.NRI.SocketPath) {
 		return fmt.Errorf("nri.socket_path %q must be an absolute path", c.NRI.SocketPath)

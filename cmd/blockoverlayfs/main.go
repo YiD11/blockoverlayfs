@@ -18,6 +18,7 @@ import (
 
 	"github.com/containerd/log"
 	"github.com/containerd/nri/pkg/stub"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/YiD11/blockoverlayfs/pkg/block"
 	"github.com/YiD11/blockoverlayfs/pkg/config"
@@ -86,6 +87,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	podSelector, err := metav1.LabelSelectorAsSelector(&cfg.PodSelector)
+	if err != nil {
+		return fmt.Errorf("pod_selector: %w", err)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -119,9 +124,10 @@ func run() error {
 	log.G(ctx).WithFields(log.Fields{
 		"included_namespaces": cfg.IncludedNamespaces,
 		"excluded_namespaces": cfg.ExcludedNamespaces,
-	}).Info("namespaces")
+		"pod_selector":        podSelector.String(),
+	}).Info("pod filters")
 
-	p := plugin.New(runtime, layers, policy, cfg.IncludedNamespaces, cfg.ExcludedNamespaces)
+	p := plugin.New(runtime, layers, policy, cfg.IncludedNamespaces, cfg.ExcludedNamespaces, podSelector)
 	var reconciler sync.WaitGroup
 	reconciler.Go(func() { p.RunReconciler(ctx, reconcileInterval, reconcileRetry) })
 	// Clear away what a node restart or an earlier run left behind before the first container asks for a layer.
@@ -150,7 +156,7 @@ func loadConfig() (config.Config, error) {
 func serve(ctx context.Context, p *plugin.Plugin, cfg config.NRIConfig, ready readiness) error {
 	var (
 		mu sync.Mutex
-		s stub.Stub
+		s  stub.Stub
 	)
 	stopped := make(chan struct{})
 	go func() {

@@ -33,4 +33,6 @@ data:
     {{- with .size.defaultSize }}
     default_size = {{ . | quote }}
     {{- end }}
+
+{{ dict "pod_selector" (.podSelector | default dict) | toToml | trim | replace "\n\n" "\n" | indent 4 }}
   {{- end }}

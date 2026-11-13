@@ -15,6 +15,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/nri/pkg/api"
+	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/YiD11/blockoverlayfs/pkg/annotation"
 	"github.com/YiD11/blockoverlayfs/pkg/block"
@@ -34,6 +35,8 @@ type Plugin struct {
 	// included and excluded are Kubernetes namespaces: see CreateContainer.
 	included []string
 	excluded []string
+	// podSelector matches the labels of the Pods whose containers get block layers.
+	podSelector labels.Selector
 
 	locks keyedLocker
 	kick  chan struct{}
@@ -51,15 +54,16 @@ type Plugin struct {
 	creating map[string]struct{}
 }
 
-func New(runtime *containerd.Client, layers *block.Store, policy sizing.Policy, included, excluded []string) *Plugin {
+func New(runtime *containerd.Client, layers *block.Store, policy sizing.Policy, included, excluded []string, podSelector labels.Selector) *Plugin {
 	return &Plugin{
-		runtime:  runtime,
-		layers:   layers,
-		policy:   policy,
-		included: included,
-		excluded: excluded,
-		kick:     make(chan struct{}, 1),
-		creating: map[string]struct{}{},
+		runtime:     runtime,
+		layers:      layers,
+		policy:      policy,
+		included:    included,
+		excluded:    excluded,
+		podSelector: podSelector,
+		kick:        make(chan struct{}, 1),
+		creating:    map[string]struct{}{},
 	}
 }
 
@@ -101,6 +105,11 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	}
 	if len(p.included) > 0 && !slices.Contains(p.included, namespace) {
 		fields["reason"] = "namespace is not included"
+		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
+		return nil, nil, nil
+	}
+	if !p.podSelector.Matches(labels.Set(pod.GetLabels())) {
+		fields["reason"] = "labels do not match pod_selector"
 		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
 		return nil, nil, nil
 	}

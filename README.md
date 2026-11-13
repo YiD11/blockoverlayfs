@@ -139,6 +139,7 @@ The plugin is configured through the chart's values; see [charts/blockoverlayfs/
 | `config.root` | `/var/lib/containerd/blockoverlayfs` | Where the images are kept. Keep it on the filesystem that holds containerd's data, which kubelet watches as the image filesystem. |
 | `config.includedNamespaces` | `[]` | Kubernetes namespaces whose Pods get block layers. Empty means every namespace. |
 | `config.excludedNamespaces` | `[]` | Kubernetes namespaces whose Pods keep plain overlayfs directories, even if also listed in `includedNamespaces`. |
+| `config.podSelector` | `{}` | A Kubernetes label selector, with `matchLabels` and `matchExpressions`. Pods it does not select when they are created keep plain overlayfs directories. Empty selects every Pod. |
 | `config.nri.socketPath` | `/var/run/nri/nri.sock` | containerd's NRI socket. |
 | `config.nri.pluginIndex` | `10` | Two digits that order the plugin among other NRI plugins. |
 | `config.containerd.address` | `/run/containerd/containerd.sock` | containerd's socket, used to find a container's snapshot. |
