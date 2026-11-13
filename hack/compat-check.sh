@@ -2,11 +2,14 @@
 # 兼容性检查：给定一个集群的 kubeconfig，找出哪些节点不满足 blockoverlayfs 的条件、不满足什么。
 #
 #   hack/compat-check.sh --kubeconfig <路径> [--context <名字>]
+#   hack/compat-check.sh --kubeconfig <路径> --registry <镜像仓库> [--probe-image <镜像>] [--namespace <命名空间>]
 #   hack/compat-check.sh --kubeconfig <路径> --probe-image <镜像> [--namespace <命名空间>]
 #
-# 不带 --probe-image：只读 API，按 containerd 版本和内核版本给节点分类，不创建任何对象。
-# 带 --probe-image：另外用 kubectl debug 在每个节点上建一个 debug Pod，读 NRI 是否开启和块文件相关的
-# 条件（loop、ext4、snapshotter 目录、挂载传播），读完删除。镜像要节点拉得到、带 chroot，例如插件镜像。
+# 不带 --registry 和 --probe-image：只读 API，按 containerd 版本和内核版本给节点分类，不创建任何对象。
+# 带其中一个：另外用 kubectl debug 在每个节点上建一个 debug Pod，读 NRI 是否开启和块文件相关的
+# 条件（loop、ext4、snapshotter 目录、挂载传播），读完删除。
+# debug Pod 的镜像：带 --registry 时是 <镜像仓库>/<镜像>，<镜像> 默认 k8s/busybox:1.36.1-musl；
+# 不带时就是 --probe-image 的值。镜像要节点拉得到、带 chroot。
 # --namespace 是 debug Pod 所在的命名空间，默认 default。
 #
 # 退出码：0 没有不满足的节点，1 有，2 参数或 kubectl 出错。
@@ -15,17 +18,20 @@ set -uo pipefail
 # 同时存在的 debug Pod 数，和等一批 debug Pod 结束的秒数（含拉镜像）。
 BATCH=5
 PROBE_TIMEOUT=120
+# 带 --registry、不带 --probe-image 时，debug Pod 的镜像在镜像仓库里的名字。
+DEFAULT_PROBE_IMAGE=k8s/busybox:1.36.1-musl
 # 插件 chart 默认的 snapshotter 目录（config.containerd.snapshotterRoot）。
 DEFAULT_SNAPSHOT_DIR=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs
 
 # ---- 参数 ----
 
-usage="用法：$0 --kubeconfig <路径> [--context <名字>] [--probe-image <镜像> [--namespace <命名空间>]]"
-KUBECONFIG_FILE="" CONTEXT="" PROBE_IMAGE="" NAMESPACE=default
+usage="用法：$0 --kubeconfig <路径> [--context <名字>] [--registry <镜像仓库>] [--probe-image <镜像>] [--namespace <命名空间>]"
+KUBECONFIG_FILE="" CONTEXT="" REGISTRY="" PROBE_IMAGE="" NAMESPACE=default
 while [ $# -gt 0 ]; do
 	case $1 in
 	--kubeconfig) KUBECONFIG_FILE=${2-} ;;
 	--context) CONTEXT=${2-} ;;
+	--registry) REGISTRY=${2-} ;;
 	--probe-image) PROBE_IMAGE=${2-} ;;
 	--namespace) NAMESPACE=${2-} ;;
 	*) echo "$usage" >&2; exit 2 ;;
@@ -33,6 +39,8 @@ while [ $# -gt 0 ]; do
 	shift 2 2>/dev/null || { echo "$usage" >&2; exit 2; }
 done
 [ -f "$KUBECONFIG_FILE" ] || { echo "$usage" >&2; exit 2; }
+# 带 --registry 时，镜像前面拼上镜像仓库。
+[ -n "$REGISTRY" ] && PROBE_IMAGE="$REGISTRY/${PROBE_IMAGE:-$DEFAULT_PROBE_IMAGE}"
 
 k() { kubectl --kubeconfig "$KUBECONFIG_FILE" ${CONTEXT:+--context "$CONTEXT"} "$@"; }
 
@@ -375,7 +383,7 @@ fi
 
 echo
 [ -n "$probe_aborted" ] && echo "建不出 debug Pod，探测中止：$probe_aborted"
-[ -z "$PROBE_IMAGE" ] && echo "NRI 是否开启和块文件相关的条件没有检查。加 --probe-image <镜像> 才会在节点上读取。"
+[ -z "$PROBE_IMAGE" ] && echo "NRI 是否开启和块文件相关的条件没有检查。加 --registry <镜像仓库> 或 --probe-image <镜像> 才会在节点上读取。"
 if [ -n "$PROBE_IMAGE" ]; then
 	unprobed=$(awk -F'|' '$8 != "不满足" && $6 != "yes"' "$tmp/final" | wc -l | tr -d ' ')
 	[ "$unprobed" -eq 0 ] || echo "$unprobed 个节点没有探测或没有读全，原因见「备注」"
