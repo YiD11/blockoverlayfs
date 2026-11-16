@@ -137,9 +137,11 @@ The plugin is configured through the chart's values; see [charts/blockoverlayfs/
 | --- | --- | --- |
 | `config.logLevel` | `info` | `trace`, `debug`, `info`, `warn`, `error`, `fatal` or `panic`. |
 | `config.root` | `/var/lib/containerd/blockoverlayfs` | Where the images are kept. Keep it on the filesystem that holds containerd's data, which kubelet watches as the image filesystem. |
+| `config.enabled` | `true` | `false` stops the plugin giving new containers block layers. It goes on removing the layers of the containers that have one, as they are removed. |
 | `config.includedNamespaces` | `[]` | Kubernetes namespaces whose Pods get block layers. Empty means every namespace. |
 | `config.excludedNamespaces` | `[]` | Kubernetes namespaces whose Pods keep plain overlayfs directories, even if also listed in `includedNamespaces`. |
 | `config.podSelector` | `{}` | A Kubernetes label selector, with `matchLabels` and `matchExpressions`. Pods it does not select when they are created keep plain overlayfs directories. Empty selects every Pod. |
+| `config.metrics.address` | unset | Where the plugin serves Prometheus metrics: a `host:port` on the node, such as `:9090`. See [Metrics](#metrics). |
 | `config.nri.socketPath` | `/var/run/nri/nri.sock` | containerd's NRI socket. |
 | `config.nri.pluginIndex` | `10` | Two digits that order the plugin among other NRI plugins. |
 | `config.containerd.address` | `/run/containerd/containerd.sock` | containerd's socket, used to find a container's snapshot. |
@@ -154,6 +156,34 @@ The plugin is configured through the chart's values; see [charts/blockoverlayfs/
 The other values place and run the DaemonSet: `image`, `nodeSelector`, `affinity`, `tolerations`, `priorityClassName`, `resources`, `updateStrategy`, `podAnnotations` and `podLabels`. By default the plugin runs on every Linux node and tolerates every taint.
 
 Changing a value with `helm upgrade` replaces the plugin's Pods, one node at a time. Containers created on a node while its Pod is being replaced get no block layer; see [Restarts](#restarts).
+
+## Metrics
+
+With `config.metrics.address` set, the plugin serves these at `/metrics`. If it cannot listen on the address, it logs that, tries again every 5 seconds, and does its work meanwhile.
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `blockoverlayfs_build_info` | gauge | Always 1, labeled with `version` and `revision`. |
+| `blockoverlayfs_enabled` | gauge | 1, or 0 when `config.enabled` is `false`. |
+| `blockoverlayfs_layers` | gauge | Images in `config.root`, counted when scraped. |
+| `blockoverlayfs_container_creations_total` | counter | Containers created while the plugin was registered, by `result`. |
+| `blockoverlayfs_layer_attach_duration_seconds` | histogram | Time from a container creation request to its layer being attached, or failing to be. containerd's `plugin_request_timeout` bounds the same span. |
+| `blockoverlayfs_reconcile_unsettled_layers` | gauge | Layers the last reconciliation left for another run: they failed, or their container was yet to be recorded. |
+| `blockoverlayfs_reconcile_deleted_layers_total` | counter | Images deleted for being no container's layer. |
+| `blockoverlayfs_reconcile_duration_seconds` | histogram | Time taken by a reconciliation. |
+| `blockoverlayfs_nri_registrations_total` | counter | Times the plugin registered with containerd: once when it starts, and again whenever containerd restarted or dropped it. |
+
+| `result` | The container |
+| --- | --- |
+| `block` | got a block layer. |
+| `disabled` | was created while `config.enabled` is `false`. |
+| `namespace` | is in a namespace that is excluded or not included. |
+| `pod_selector` | is in a Pod that `config.podSelector` does not select. |
+| `no_size` | declares no size, and `config.size.defaultSize` is unset. |
+| `other_snapshotter` | has its rootfs on another snapshotter. |
+| `attach_failed` | keeps a plain overlayfs directory because its layer could not be attached. |
+| `abandoned` | got its layer after containerd had given the request up. |
+| `error` | was refused by the plugin, to be created again by kubelet. |
 
 ## Limits
 
@@ -194,6 +224,8 @@ When the plugin deletes an image that is no container's layer, it logs `deleted 
 | `it is mounted nowhere` | The node restarted, or attaching or removing the layer was cut short before the image was mounted or after it was unmounted. |
 | `it holds no upper directory` | Attaching the layer was cut short after the image was mounted, or the container was removed while the plugin was not registered. |
 | `it has no container` | The container was removed, or containerd gave its creation up, while the plugin was not registered. |
+
+After it has looked at every image, at least every 10 minutes, the plugin logs `reconciled block writable layers` with `layers`, the images it left; `unsettled`, those of them it could not settle; `deleted`; and `duration`.
 
 A plugin Pod that does not become ready has not registered with containerd, and its log says why. One that stays in `ContainerCreating` is missing a directory on the node, which the Pod's events name: `/var/run/nri` is missing when NRI is disabled in containerd.
 

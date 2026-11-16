@@ -20,6 +20,7 @@ import (
 	"github.com/YiD11/blockoverlayfs/pkg/annotation"
 	"github.com/YiD11/blockoverlayfs/pkg/block"
 	"github.com/YiD11/blockoverlayfs/pkg/containerd"
+	"github.com/YiD11/blockoverlayfs/pkg/metrics"
 	"github.com/YiD11/blockoverlayfs/pkg/sizing"
 )
 
@@ -32,6 +33,8 @@ type Plugin struct {
 	runtime *containerd.Client
 	layers  *block.Store
 	policy  sizing.Policy
+	// enabled is false for a plugin that gives no new container a block layer.
+	enabled bool
 	// included and excluded are Kubernetes namespaces: see CreateContainer.
 	included []string
 	excluded []string
@@ -54,11 +57,12 @@ type Plugin struct {
 	creating map[string]struct{}
 }
 
-func New(runtime *containerd.Client, layers *block.Store, policy sizing.Policy, included, excluded []string, podSelector labels.Selector) *Plugin {
+func New(runtime *containerd.Client, layers *block.Store, policy sizing.Policy, enabled bool, included, excluded []string, podSelector labels.Selector) *Plugin {
 	return &Plugin{
 		runtime:     runtime,
 		layers:      layers,
 		policy:      policy,
+		enabled:     enabled,
 		included:    included,
 		excluded:    excluded,
 		podSelector: podSelector,
@@ -88,27 +92,38 @@ func (p *Plugin) Drain() {
 }
 
 // CreateContainer gives a new container its block writable layer. The container keeps the snapshotter's directory
-// if it gets no size, if its rootfs is not on the configured snapshotter, or if the layer cannot be attached: it then
-// starts without a limit rather than not at all. Once the plugin drains, a container that would get a layer fails
+// if the plugin is disabled, if it gets no size, if its rootfs is not on the configured snapshotter, or if the layer
+// cannot be attached: it then starts without a limit rather than not at all. Once the plugin drains, a container that would get a layer fails
 // to be created instead, so that kubelet creates it again when the plugin is back.
 func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	start := time.Now()
 	id := ctr.GetId()
 	fields := containerFields(pod, ctr)
+	result := metrics.ResultError
+	defer func() { metrics.ContainerCreations.WithLabelValues(result).Inc() }()
 
+	if !p.enabled {
+		result = metrics.ResultDisabled
+		fields["reason"] = "the plugin is disabled"
+		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
+		return nil, nil, nil
+	}
 	// Exclusion wins over inclusion.
 	namespace := pod.GetNamespace()
 	if slices.Contains(p.excluded, namespace) {
+		result = metrics.ResultNamespace
 		fields["reason"] = "namespace is excluded"
 		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
 		return nil, nil, nil
 	}
 	if len(p.included) > 0 && !slices.Contains(p.included, namespace) {
+		result = metrics.ResultNamespace
 		fields["reason"] = "namespace is not included"
 		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
 		return nil, nil, nil
 	}
 	if !p.podSelector.Matches(labels.Set(pod.GetLabels())) {
+		result = metrics.ResultPodSelector
 		fields["reason"] = "labels do not match pod_selector"
 		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
 		return nil, nil, nil
@@ -124,6 +139,7 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 		fields["reason"] = note + ": " + size.Reason
 	}
 	if size.Size == 0 {
+		result = metrics.ResultNoSize
 		log.G(ctx).WithFields(fields).Info("container keeps a directory writable layer")
 		return nil, nil, nil
 	}
@@ -136,13 +152,17 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	defer unlock()
 	dir, err := p.runtime.SnapshotDir(ctx, id)
 	if errdefs.IsNotFound(err) {
+		result = metrics.ResultOtherSnapshotter
 		log.G(ctx).WithFields(fields).WithError(err).Warn("container keeps a directory writable layer: its rootfs is not on the configured snapshotter")
 		return nil, nil, nil
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("find the rootfs of container %s: %w", id, err)
 	}
-	if err := p.layers.Attach(ctx, id, dir, size.Size); err != nil {
+	err = p.layers.Attach(ctx, id, dir, size.Size)
+	metrics.LayerAttachDuration.Observe(time.Since(start).Seconds())
+	if err != nil {
+		result = metrics.ResultAttachFailed
 		log.G(ctx).WithFields(fields).WithError(err).Error("container keeps a directory writable layer: failed to attach its block writable layer")
 		// Attach takes back what it did, unless that failed too.
 		p.Kick()
@@ -150,7 +170,9 @@ func (p *Plugin) CreateContainer(ctx context.Context, pod *api.PodSandbox, ctr *
 	}
 	// A request that is over was given up by containerd, which then creates the container without waiting, or
 	// not at all.
+	result = metrics.ResultAbandoned
 	if ctx.Err() == nil {
+		result = metrics.ResultBlock
 		p.mu.Lock()
 		p.creating[id] = struct{}{}
 		p.mu.Unlock()

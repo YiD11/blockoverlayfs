@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -45,6 +46,9 @@ var (
 type Config struct {
 	LogLevel string `toml:"log_level"`
 	Root     string `toml:"root"`
+	// Enabled says whether new containers get block layers. Disabled, the plugin goes on removing the layers of the
+	// containers that have one, as they are removed.
+	Enabled bool `toml:"enabled"`
 	// IncludedNamespaces and ExcludedNamespaces name Kubernetes namespaces of Pods. A container gets a block layer
 	// only if its Pod's namespace is not excluded and, when IncludedNamespaces is not empty, is included.
 	IncludedNamespaces []string `toml:"included_namespaces"`
@@ -52,9 +56,16 @@ type Config struct {
 	// PodSelector selects Pods by their labels. A container gets a block layer only if its Pod is selected. The
 	// empty selector selects every Pod.
 	PodSelector metav1.LabelSelector `toml:"pod_selector"`
+	Metrics     MetricsConfig        `toml:"metrics"`
 	NRI         NRIConfig            `toml:"nri"`
 	Containerd  ContainerdConfig     `toml:"containerd"`
 	Size        SizeConfig           `toml:"size"`
+}
+
+// MetricsConfig is where the plugin serves its Prometheus metrics.
+type MetricsConfig struct {
+	// Address is the host:port to listen on, such as ":9090". Empty serves no metrics.
+	Address string `toml:"address"`
 }
 
 // NRIConfig is how the plugin connects to containerd's NRI.
@@ -88,6 +99,7 @@ func Default() Config {
 	return Config{
 		LogLevel: DefaultLogLevel,
 		Root:     DefaultRoot,
+		Enabled:  true,
 		NRI: NRIConfig{
 			SocketPath:  DefaultNRISocketPath,
 			PluginIndex: DefaultPluginIndex,
@@ -130,6 +142,11 @@ func (c Config) Validate() error {
 	}
 	if _, err := metav1.LabelSelectorAsSelector(&c.PodSelector); err != nil {
 		return fmt.Errorf("pod_selector: %w", err)
+	}
+	if c.Metrics.Address != "" {
+		if _, _, err := net.SplitHostPort(c.Metrics.Address); err != nil {
+			return fmt.Errorf("metrics.address: %w", err)
+		}
 	}
 	if !filepath.IsAbs(c.NRI.SocketPath) {
 		return fmt.Errorf("nri.socket_path %q must be an absolute path", c.NRI.SocketPath)

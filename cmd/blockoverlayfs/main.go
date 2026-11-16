@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/YiD11/blockoverlayfs/pkg/block"
 	"github.com/YiD11/blockoverlayfs/pkg/config"
 	"github.com/YiD11/blockoverlayfs/pkg/containerd"
+	"github.com/YiD11/blockoverlayfs/pkg/metrics"
 	"github.com/YiD11/blockoverlayfs/pkg/plugin"
 	"github.com/YiD11/blockoverlayfs/version"
 )
@@ -41,6 +43,8 @@ const (
 	maxRetry = 30 * time.Second
 	// settled is how long a connection has to last for the backoff to start over.
 	settled = time.Second
+	// metricsRetry paces listening again on a metrics address that cannot be listened on.
+	metricsRetry = 5 * time.Second
 )
 
 var (
@@ -122,19 +126,29 @@ func run() error {
 		"default_size":    policy.DefaultSize,
 	}).Info("size policy")
 	log.G(ctx).WithFields(log.Fields{
+		"enabled":             cfg.Enabled,
 		"included_namespaces": cfg.IncludedNamespaces,
 		"excluded_namespaces": cfg.ExcludedNamespaces,
 		"pod_selector":        podSelector.String(),
 	}).Info("pod filters")
 
-	p := plugin.New(runtime, layers, policy, cfg.IncludedNamespaces, cfg.ExcludedNamespaces, podSelector)
-	var reconciler sync.WaitGroup
-	reconciler.Go(func() { p.RunReconciler(ctx, reconcileInterval, reconcileRetry) })
+	metrics.BuildInfo.WithLabelValues(version.Version, version.Revision).Set(1)
+	if cfg.Enabled {
+		metrics.Enabled.Set(1)
+	}
+	metrics.RegisterLayers(layers)
+
+	p := plugin.New(runtime, layers, policy, cfg.Enabled, cfg.IncludedNamespaces, cfg.ExcludedNamespaces, podSelector)
+	var background sync.WaitGroup
+	if cfg.Metrics.Address != "" {
+		background.Go(func() { serveMetrics(ctx, cfg.Metrics.Address) })
+	}
+	background.Go(func() { p.RunReconciler(ctx, reconcileInterval, reconcileRetry) })
 	// Clear away what a node restart or an earlier run left behind before the first container asks for a layer.
 	p.Kick()
 	err = serve(ctx, p, cfg.NRI, ready)
 	// Layers stay mounted when the plugin stops: running containers keep using them.
-	reconciler.Wait()
+	background.Wait()
 	p.Wait()
 	return err
 }
@@ -208,6 +222,7 @@ func serve(ctx context.Context, p *plugin.Plugin, cfg config.NRIConfig, ready re
 				fields["after"] = time.Since(since).Round(time.Millisecond).String()
 			}
 			log.G(ctx).WithFields(fields).Info("registered with NRI")
+			metrics.NRIRegistrations.Inc()
 			since = time.Time{}
 			ready.set(ctx, true)
 			registered := time.Now()
@@ -242,6 +257,32 @@ func serve(ctx context.Context, p *plugin.Plugin, cfg config.NRIConfig, ready re
 	<-stopped
 	log.G(ctx).Info("shutting down")
 	return nil
+}
+
+// serveMetrics serves the plugin's metrics at address until ctx is done. An address that cannot be listened on is
+// tried again every metricsRetry: the plugin does its work without its metrics.
+func serveMetrics(ctx context.Context, address string) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", metrics.Handler())
+	for ctx.Err() == nil {
+		l, err := net.Listen("tcp", address)
+		if err == nil {
+			log.G(ctx).WithField("address", l.Addr().String()).Info("serving metrics")
+			// A closed server cannot serve again.
+			srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+			stop := context.AfterFunc(ctx, func() { _ = srv.Close() })
+			err = srv.Serve(l)
+			stop()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.G(ctx).WithError(err).WithField("retry_in", metricsRetry.String()).Error("not serving metrics")
+		select {
+		case <-ctx.Done():
+		case <-time.After(metricsRetry):
+		}
+	}
 }
 
 // retryDelay says how long to wait before registering again after err, and the backoff to use after the next

@@ -23,18 +23,20 @@ func writeConfig(t *testing.T, content string) string {
 }
 
 func TestLoadKeepsTheDefaultsAFileDoesNotSet(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "log_level = \"debug\"\nincluded_namespaces = [\"a\", \"b\"]\nexcluded_namespaces = [\"c\"]\n[size]\ndefault_size = \"20Gi\"\n[pod_selector.matchLabels]\nk = \"v\"\n[[pod_selector.matchExpressions]]\nkey = \"e\"\noperator = \"NotIn\"\nvalues = [\"x\"]\n"))
+	cfg, err := Load(writeConfig(t, "log_level = \"debug\"\nenabled = false\nincluded_namespaces = [\"a\", \"b\"]\nexcluded_namespaces = [\"c\"]\n[metrics]\naddress = \":9090\"\n[size]\ndefault_size = \"20Gi\"\n[pod_selector.matchLabels]\nk = \"v\"\n[[pod_selector.matchExpressions]]\nkey = \"e\"\noperator = \"NotIn\"\nvalues = [\"x\"]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := Default()
 	want.LogLevel = "debug"
+	want.Enabled = false
 	want.IncludedNamespaces = []string{"a", "b"}
 	want.ExcludedNamespaces = []string{"c"}
 	want.PodSelector = metav1.LabelSelector{
 		MatchLabels:      map[string]string{"k": "v"},
 		MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "e", Operator: metav1.LabelSelectorOpNotIn, Values: []string{"x"}}},
 	}
+	want.Metrics.Address = ":9090"
 	want.Size.DefaultSize = "20Gi"
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load = %+v, want %+v", cfg, want)
@@ -67,6 +69,7 @@ func TestValidate(t *testing.T) {
 		{name: "a Pod selector with an unknown operator", modify: func(c *Config) {
 			c.PodSelector.MatchExpressions = []metav1.LabelSelectorRequirement{{Key: "k", Operator: "Equals", Values: []string{"v"}}}
 		}},
+		{name: "a metrics address without a port", modify: func(c *Config) { c.Metrics.Address = "localhost" }},
 		{name: "relative NRI socket", modify: func(c *Config) { c.NRI.SocketPath = "nri.sock" }},
 		{name: "one-digit plugin index", modify: func(c *Config) { c.NRI.PluginIndex = "1" }},
 		{name: "no containerd address", modify: func(c *Config) { c.Containerd.Address = "" }},

@@ -12,11 +12,13 @@ import (
 	"github.com/bytedance/mockey"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/nri/pkg/api"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/YiD11/blockoverlayfs/pkg/annotation"
 	"github.com/YiD11/blockoverlayfs/pkg/block"
 	"github.com/YiD11/blockoverlayfs/pkg/containerd"
+	"github.com/YiD11/blockoverlayfs/pkg/metrics"
 	"github.com/YiD11/blockoverlayfs/pkg/sizing"
 )
 
@@ -184,7 +186,7 @@ func newPlugin(t *testing.T, rt *fakeRuntime, layers *fakeLayers, policy sizing.
 		mocker := mockey.Mock(m.target).To(m.hook).Build()
 		t.Cleanup(func() { mocker.UnPatch() })
 	}
-	return New(&containerd.Client{}, &block.Store{}, policy, nil, nil, labels.Everything())
+	return New(&containerd.Client{}, &block.Store{}, policy, true, nil, nil, labels.Everything())
 }
 
 // runReconciler runs the plugin's reconciler until the test ends, and waits for it to return: it has to be gone
@@ -318,6 +320,81 @@ func TestCreateContainerFiltersByLabel(t *testing.T) {
 				t.Errorf("layer = %v, want %v", ok, tc.layer)
 			}
 		})
+	}
+}
+
+func TestCreateContainerCountsItsResult(t *testing.T) {
+	for _, tc := range []struct {
+		result    string
+		setup     func(p *Plugin, rt *fakeRuntime, layers *fakeLayers)
+		cancelled bool // containerd gave the request up
+	}{
+		{result: metrics.ResultBlock},
+		{result: metrics.ResultDisabled, setup: func(p *Plugin, _ *fakeRuntime, _ *fakeLayers) { p.enabled = false }},
+		{result: metrics.ResultNamespace, setup: func(p *Plugin, _ *fakeRuntime, _ *fakeLayers) { p.excluded = []string{"default"} }},
+		{result: metrics.ResultPodSelector, setup: func(p *Plugin, _ *fakeRuntime, _ *fakeLayers) { p.podSelector = labels.Nothing() }},
+		{result: metrics.ResultNoSize, setup: func(p *Plugin, _ *fakeRuntime, _ *fakeLayers) { p.policy.DefaultSize = 0 }},
+		{result: metrics.ResultOtherSnapshotter, setup: func(_ *Plugin, rt *fakeRuntime, _ *fakeLayers) { delete(rt.snapshots, "ctr") }},
+		{result: metrics.ResultAttachFailed, setup: func(_ *Plugin, _ *fakeRuntime, layers *fakeLayers) { layers.attachErr = errors.New("mkfs failed") }},
+		{result: metrics.ResultAbandoned, cancelled: true},
+		{result: metrics.ResultError, setup: func(_ *Plugin, rt *fakeRuntime, _ *fakeLayers) { rt.err = errors.New("containerd is gone") }},
+	} {
+		t.Run(tc.result, func(t *testing.T) {
+			rt, layers := newFakeRuntime(), newFakeLayers()
+			rt.snapshots["ctr"] = "/snapshots/7"
+			p := newPlugin(t, rt, layers, sizing.Policy{RequestPercent: 105, DefaultSize: gi})
+			if tc.setup != nil {
+				tc.setup(p, rt, layers)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			}
+			counter := metrics.ContainerCreations.WithLabelValues(tc.result)
+			before := testutil.ToFloat64(counter)
+
+			// Only the result is of interest here, an error being one.
+			_, _, _ = p.CreateContainer(ctx, pod(""), container("ctr", "app"))
+			if got := testutil.ToFloat64(counter) - before; got != 1 {
+				t.Errorf("counted %v containers as %s, want 1", got, tc.result)
+			}
+		})
+	}
+}
+
+func TestDisabledPluginCreatesNoLayerAndStillRemoves(t *testing.T) {
+	ctx := context.Background()
+	rt, layers := newFakeRuntime(), newFakeLayers()
+	rt.snapshots["new"] = "/snapshots/7"
+	// A container that got its layer before the plugin was disabled.
+	rt.containers["running"] = true
+	layers.put("running", fakeLayer{mounted: true})
+	// A container removed while the plugin was not registered.
+	layers.put("removed", fakeLayer{mounted: true})
+	p := synchronized(t, rt, layers)
+	p.enabled = false
+
+	if _, _, err := p.CreateContainer(ctx, pod(`{"app":{"limit":"1Gi"}}`), container("new", "app")); err != nil {
+		t.Fatal(err)
+	}
+	if l, ok := layers.get("new"); ok {
+		t.Errorf("got a layer %+v, want none", l)
+	}
+
+	if !p.Reconcile(ctx) {
+		t.Error("Reconcile left something unsettled")
+	}
+	if ids, _ := layers.IDs(); !slices.Equal(ids, []string{"running"}) {
+		t.Errorf("layers left = %v, want [running]", ids)
+	}
+
+	if err := p.RemoveContainer(ctx, pod(""), container("running", "app")); err != nil {
+		t.Fatal(err)
+	}
+	p.Wait()
+	if ids, _ := layers.IDs(); len(ids) != 0 {
+		t.Errorf("layers left = %v, want none", ids)
 	}
 }
 
@@ -507,6 +584,37 @@ func TestReconcileKeepsAttachedLayersWhenContainerdCannotAnswer(t *testing.T) {
 	}
 	if got := rt.askedCount(); got != 1 {
 		t.Errorf("asked containerd %d times, want once: it did not answer", got)
+	}
+}
+
+func TestReconcileCountsWhatItDeletedAndLeftUnsettled(t *testing.T) {
+	ctx := context.Background()
+	rt, layers := newFakeRuntime(), newFakeLayers()
+	rt.err = errors.New("containerd is gone")
+	// Attached layers wait for containerd's answer.
+	layers.put("a", fakeLayer{mounted: true})
+	layers.put("b", fakeLayer{mounted: true})
+	layers.put("rebooted", fakeLayer{})
+	p := synchronized(t, rt, layers)
+	before := testutil.ToFloat64(metrics.ReconcileDeletedLayers)
+
+	p.Reconcile(ctx)
+	if got := testutil.ToFloat64(metrics.ReconcileUnsettledLayers); got != 2 {
+		t.Errorf("unsettled layers = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(metrics.ReconcileDeletedLayers) - before; got != 1 {
+		t.Errorf("deleted %v layers, want 1", got)
+	}
+
+	// containerd answers again: it has one of the two containers.
+	rt.fail(nil)
+	rt.addContainer("a")
+	p.Reconcile(ctx)
+	if got := testutil.ToFloat64(metrics.ReconcileUnsettledLayers); got != 0 {
+		t.Errorf("unsettled layers = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(metrics.ReconcileDeletedLayers) - before; got != 2 {
+		t.Errorf("deleted %v layers, want 2", got)
 	}
 }
 
