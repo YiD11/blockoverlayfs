@@ -1,6 +1,8 @@
 image:
-  # Build the image with `make image` and push it to a registry your nodes pull from.
-  repository: blockoverlayfs
+  # Build the image with `make image` and push it to a registry your nodes pull from. It is pulled as
+  # <registry>/<name>:<tag>, or <name>:<tag> when registry is empty.
+  registry: ""
+  name: blockoverlayfs
   # Defaults to the chart's appVersion.
   tag: ""
   pullPolicy: IfNotPresent
@@ -27,10 +29,6 @@ config:
   # podSelector:
   #   matchExpressions:
   #     - {key: blockoverlayfs.io/skip, operator: NotIn, values: ["true"]}
-  metrics:
-    # Where the plugin serves Prometheus metrics, at /metrics: a host:port on the node, such as ":9090". Empty
-    # serves none.
-    address: ""
   nri:
     socketPath: /var/run/nri/nri.sock
     # Orders the plugin among NRI plugins: two digits, lower first.
@@ -54,6 +52,17 @@ config:
 # containerd's state directory, where its shims mount container rootfs. The plugin has to see those mounts.
 containerdStateDir: /run/containerd
 
+metrics:
+  # The port on the node where the plugin serves Prometheus metrics, at /metrics: its Pod is on the node's network.
+  # Unset serves none.
+  port: 9466
+
+# A Service and a Prometheus Operator ServiceMonitor for the metrics. Needs metrics.port and the ServiceMonitor CRD.
+serviceMonitor:
+  enabled: true
+  # The labels the monitoring stack selects ServiceMonitors by.
+  labels: {}
+
 podAnnotations:
   # Lets the plugin's own Pod start on nodes where containerd's NRI validator requires the plugin for every
   # container, with this key as its tolerate_missing_plugins_annotation. It does nothing anywhere else.
@@ -64,8 +73,20 @@ priorityClassName: system-node-critical
 
 nodeSelector:
   kubernetes.io/os: linux
+  kubernetes.io/arch: amd64
 
-affinity: {}
+# Business nodes only: those with scitix.ai/instance-type, other than control-plane and scitix-system nodes.
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: scitix.ai/instance-type
+              operator: Exists
+            - key: node-role.kubernetes.io/control-plane
+              operator: DoesNotExist
+            - key: node-role.kubernetes.io/scitix-system
+              operator: DoesNotExist
 
 # The plugin runs on every node it is not kept off by nodeSelector or affinity.
 tolerations:

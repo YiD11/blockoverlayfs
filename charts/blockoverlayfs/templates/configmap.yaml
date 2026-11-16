@@ -4,11 +4,7 @@ metadata:
   name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
   labels:
-    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
-    app.kubernetes.io/name: blockoverlayfs
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    {{- include "blockoverlayfs.labels" . | nindent 4 }}
 data:
   {{- with .Values.config }}
   config.toml: |
@@ -19,7 +15,7 @@ data:
     excluded_namespaces = {{ .excludedNamespaces | default list | toJson }}
 
     [metrics]
-    address = {{ .metrics.address | quote }}
+    address = {{ with $.Values.metrics.port }}{{ printf ":%d" (int .) | quote }}{{ else }}""{{ end }}
 
     [nri]
     socket_path = {{ .nri.socketPath | quote }}

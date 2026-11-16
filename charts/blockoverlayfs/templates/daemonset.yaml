@@ -11,23 +11,17 @@ metadata:
   name: {{ .Release.Name }}
   namespace: {{ .Release.Namespace }}
   labels:
-    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
-    app.kubernetes.io/name: blockoverlayfs
-    app.kubernetes.io/instance: {{ .Release.Name }}
-    app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    {{- include "blockoverlayfs.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: blockoverlayfs
-      app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- include "blockoverlayfs.selectorLabels" . | nindent 6 }}
   updateStrategy:
     {{- toYaml .Values.updateStrategy | nindent 4 }}
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: blockoverlayfs
-        app.kubernetes.io/instance: {{ .Release.Name }}
+        {{- include "blockoverlayfs.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -42,8 +36,8 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      # The plugin talks to containerd over sockets on the node and to nothing else. On the node's network its Pod
-      # starts without waiting for the CNI plugin.
+      # The plugin talks to containerd over sockets on the node, and serves its metrics on a port of the node. On the
+      # node's network its Pod starts without waiting for the CNI plugin.
       hostNetwork: true
       automountServiceAccountToken: false
       {{- with .Values.priorityClassName }}
@@ -52,7 +46,7 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       containers:
         - name: blockoverlayfs
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ with .Values.image.registry }}{{ . }}/{{ end }}{{ .Values.image.name }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - --config=/etc/blockoverlayfs/config.toml

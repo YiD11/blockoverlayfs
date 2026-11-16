@@ -1,0 +1,20 @@
+{{- if .Values.serviceMonitor.enabled }}
+{{- $port := required "serviceMonitor.enabled needs metrics.port" .Values.metrics.port | int }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "blockoverlayfs.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "blockoverlayfs.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ $port }}
+      # The plugin's container declares no port. On the node's network a declared port is a host port, and the
+      # scheduler keeps a Pod off the nodes where another Pod has declared it.
+      targetPort: {{ $port }}
+{{- end }}

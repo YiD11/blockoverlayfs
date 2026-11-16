@@ -52,7 +52,7 @@ containerd calls the plugin after the snapshotter has prepared the container's r
 
    ```bash
    helm install blockoverlayfs charts/blockoverlayfs --namespace kube-system \
-     --set image.repository=registry.example.com/blockoverlayfs --set image.tag=0.1.0
+     --set image.registry=registry.example.com --set image.tag=0.1.0
    ```
 
    The chart runs the plugin on every node as a privileged DaemonSet. Its Pod mounts the snapshotter's directory with bidirectional mount propagation, so the layers it mounts there appear on the node, where containerd's shims mount container rootfs. A Pod is ready once the plugin has registered with containerd. See [Configuration](#configuration) for the chart's values.
@@ -141,7 +141,6 @@ The plugin is configured through the chart's values; see [charts/blockoverlayfs/
 | `config.includedNamespaces` | `[]` | Kubernetes namespaces whose Pods get block layers. Empty means every namespace. |
 | `config.excludedNamespaces` | `[]` | Kubernetes namespaces whose Pods keep plain overlayfs directories, even if also listed in `includedNamespaces`. |
 | `config.podSelector` | `{}` | A Kubernetes label selector, with `matchLabels` and `matchExpressions`. Pods it does not select when they are created keep plain overlayfs directories. Empty selects every Pod. |
-| `config.metrics.address` | unset | Where the plugin serves Prometheus metrics: a `host:port` on the node, such as `:9090`. See [Metrics](#metrics). |
 | `config.nri.socketPath` | `/var/run/nri/nri.sock` | containerd's NRI socket. |
 | `config.nri.pluginIndex` | `10` | Two digits that order the plugin among other NRI plugins. |
 | `config.containerd.address` | `/run/containerd/containerd.sock` | containerd's socket, used to find a container's snapshot. |
@@ -152,14 +151,17 @@ The plugin is configured through the chart's values; see [charts/blockoverlayfs/
 | `config.size.requestPercent` | `105` | Applied to a request. At least 100. |
 | `config.size.defaultSize` | unset | Size for containers that declare nothing. At least 16Mi. |
 | `containerdStateDir` | `/run/containerd` | containerd's state directory, where its shims mount container rootfs. The plugin looks there before it covers a snapshot. |
+| `metrics.port` | `9466` | The port on the node where the plugin serves Prometheus metrics. Unset serves none. See [Metrics](#metrics). |
+| `serviceMonitor.enabled` | `true` | Adds a Service and a Prometheus Operator ServiceMonitor for the metrics. Needs `metrics.port` and the ServiceMonitor CRD. |
+| `serviceMonitor.labels` | `{}` | Labels on the ServiceMonitor, for the monitoring stack to select it by. |
 
-The other values place and run the DaemonSet: `image`, `nodeSelector`, `affinity`, `tolerations`, `priorityClassName`, `resources`, `updateStrategy`, `podAnnotations` and `podLabels`. By default the plugin runs on every Linux node and tolerates every taint.
+The other values place and run the DaemonSet: `image`, `nodeSelector`, `affinity`, `tolerations`, `priorityClassName`, `resources`, `updateStrategy`, `podAnnotations` and `podLabels`. By default the plugin runs on every amd64 Linux node that has the `scitix.ai/instance-type` label and is neither a control-plane (`node-role.kubernetes.io/control-plane`) nor a `node-role.kubernetes.io/scitix-system` node, and tolerates every taint.
 
 Changing a value with `helm upgrade` replaces the plugin's Pods, one node at a time. Containers created on a node while its Pod is being replaced get no block layer; see [Restarts](#restarts).
 
 ## Metrics
 
-With `config.metrics.address` set, the plugin serves these at `/metrics`. If it cannot listen on the address, it logs that, tries again every 5 seconds, and does its work meanwhile.
+With `metrics.port` set, the plugin serves these at `/metrics` on that port of the node. If it cannot listen on the port, it logs that, tries again every 5 seconds, and does its work meanwhile.
 
 | Metric | Type | Meaning |
 | --- | --- | --- |
