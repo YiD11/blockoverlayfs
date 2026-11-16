@@ -33,7 +33,7 @@ containerd calls the plugin after the snapshotter has prepared the container's r
 ## Requirements
 
 - Kubernetes on containerd 2.x with NRI enabled, which is the default, and containerd's overlayfs snapshotter.
-- Linux 5.15 or newer with overlayfs, ext4 and loop devices.
+- Linux 4.4 or newer with overlayfs, ext4 and loop devices.
 - A node whose `/` is a shared mount, which it is under systemd: the plugin mounts in its container, and the mounts have to reach the node.
 - Helm 3 or newer.
 

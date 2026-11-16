@@ -43,9 +43,8 @@ config:
     snapshotter: overlayfs
     snapshotterRoot: /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs
   size:
-    # Subtracted from a container's limit, leaving room under it for the container's logs and emptyDir volumes,
-    # for example 256Mi.
-    limitOffset: "0"
+    # Subtracted from a container's limit, leaving room under it for the container's logs and emptyDir volumes.
+    limitOffset: "256Mi"
     # Applied to a container's request when it declares no limit. At least 100.
     requestPercent: 105
     # For containers that declare nothing, for example 20Gi. Empty keeps such containers on plain overlayfs
@@ -83,7 +82,7 @@ resources:
 updateStrategy:
   type: RollingUpdate
   rollingUpdate:
-    maxUnavailable: 1
+    maxUnavailable: 10%
 
 # How long the plugin gets to finish the layer it is attaching or removing when its Pod is deleted.
 terminationGracePeriodSeconds: 30

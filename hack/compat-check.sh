@@ -89,8 +89,8 @@ while IFS='|' read -r node ready runtime kernel; do
 		group="无法识别"
 	fi
 	if [[ $kernel =~ ^([0-9]+)\.([0-9]+) ]]; then
-		if [ "${BASH_REMATCH[1]}" -lt 5 ] || { [ "${BASH_REMATCH[1]}" -eq 5 ] && [ "${BASH_REMATCH[2]}" -lt 15 ]; }; then
-			fail "内核 $kernel 低于 5.15"
+		if [ "${BASH_REMATCH[1]}" -lt 4 ] || { [ "${BASH_REMATCH[1]}" -eq 4 ] && [ "${BASH_REMATCH[2]}" -lt 4 ]; }; then
+			fail "内核 $kernel 低于 4.4"
 		fi
 	fi
 	[ "$ready" = True ] || note "节点不是 Ready，它上报的信息可能是旧的"
