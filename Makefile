@@ -19,7 +19,7 @@ GO_BUILD := CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -trimpath -l
 IMAGE ?= $(TARGET_BIN):$(VERSION)
 CHART := charts/$(TARGET_BIN)
 
-.PHONY: all binaries image test test-root vet lint helm-lint tidy clean help
+.PHONY: all binaries image test test-root e2e-build e2e vet lint helm-lint tidy clean help
 
 all: binaries
 
@@ -30,6 +30,7 @@ help:
 	@echo " * 'image'     - Build the container image $(IMAGE) with $(CONTAINER_TOOL)."
 	@echo " * 'test'      - Run unit tests on the host platform."
 	@echo " * 'test-root' - Run the block layer tests on loop devices, ext4 and overlayfs (Linux, root)."
+	@echo " * 'e2e'       - Run the e2e suite on the node E2E_NODE of the cluster kubectl points at (kubectl, helm)."
 	@echo " * 'vet'       - Run go vet for the host platform and for linux."
 	@echo " * 'lint'      - Run golangci-lint."
 	@echo " * 'helm-lint' - Lint and render the Helm chart."
@@ -51,9 +52,26 @@ ROOT_TESTFLAGS ?= -race
 test-root:
 	$(GO) test $(ROOT_TESTFLAGS) -count=1 ./pkg/block/ -test.root
 
+# The suite runs where kubectl does, so it is built for the host, without cgo so that it runs whatever C library
+# the host has. The helper NRI plugin runs on the node.
+E2E_OUT := _output/e2e
+e2e-build:
+	CGO_ENABLED=0 $(GO) test -c -tags e2e -o $(E2E_OUT)/e2e.test ./test/e2e/
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) $(GO) build -o $(E2E_OUT)/rejector ./test/e2e/rejector
+
+# The suite runs on the cluster kubectl points at: E2E_NODE names the node to test on, E2E_IMAGE the plugin image, in
+# a registry the node pulls from, and E2E_TEST_IMAGE the image of the suite's own Pods. E2E_LABELS, if set, is a
+# Ginkgo label filter over basic, config, restart and load. The suite reads the chart and its test data relative to
+# its own directory. hack/e2e-run.py runs this in a Pod of the cluster.
+E2E_TEST_IMAGE ?= busybox:1.36
+e2e: e2e-build
+	cd test/e2e && E2E_TEST_IMAGE=$(E2E_TEST_IMAGE) E2E_REJECTOR=$(CURDIR)/$(E2E_OUT)/rejector \
+		$(CURDIR)/$(E2E_OUT)/e2e.test -test.timeout 2h -ginkgo.v -ginkgo.label-filter="$(E2E_LABELS)" \
+		-ginkgo.json-report=$(CURDIR)/$(E2E_OUT)/report.json
+
 vet:
-	$(GO) vet ./...
-	GOOS=linux $(GO) vet ./...
+	$(GO) vet -tags e2e ./...
+	GOOS=linux $(GO) vet -tags e2e ./...
 
 # Linted as linux: off Linux the block layer is a stub that always fails, which staticcheck reports as unreachable
 # code in main.

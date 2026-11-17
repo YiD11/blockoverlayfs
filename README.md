@@ -248,6 +248,7 @@ make vet        # go vet for the host and for linux
 make lint       # golangci-lint v2
 sudo -E env "PATH=$PATH" make test-root   # Linux and root: block layers on loop devices, ext4 and overlayfs
 make helm-lint  # lint and render the chart
+make e2e        # the e2e suite, on the node E2E_NODE of the cluster kubectl points at: kubectl and helm
 make image      # build the container image
 ```
 
@@ -262,6 +263,7 @@ Building needs Go 1.25 or newer.
 | `pkg/sizing` | Size policy |
 | `pkg/annotation` | Annotation format |
 | `pkg/config` | Configuration file |
+| `test/e2e` | The e2e suite: the plugin as its chart deploys it, with kubelet and containerd |
 
 The chart is in `charts/blockoverlayfs`, and the image is built from `Dockerfile`.
 

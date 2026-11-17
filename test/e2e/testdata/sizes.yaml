@@ -1,0 +1,54 @@
+# One container for every way of declaring a size. The sizes the specs expect assume the base values.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: matrix
+  namespace: {{ .Namespace }}
+  labels:
+    blockoverlayfs.io/e2e: "true"
+  annotations:
+    blockoverlayfs.io/ephemeral-storage: '{"request-only":{"request":"4Gi"},"limit-only":{"limit":"1Gi"},"both":{"request":"512Mi","limit":"2Gi"},"none":{}}'
+spec:
+  nodeName: {{ .Node }}
+  terminationGracePeriodSeconds: 1
+  containers:
+    - {name: request-only, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sleep", "36000"]}
+    - {name: limit-only, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sleep", "36000"]}
+    - {name: both, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sleep", "36000"]}
+    - {name: none, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sleep", "36000"]}
+    - {name: unlisted, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sleep", "36000"]}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: edge
+  namespace: {{ .Namespace }}
+  labels:
+    blockoverlayfs.io/e2e: "true"
+  annotations:
+    # A limit that leaves less than the smallest layer once limitOffset is taken off, and none.
+    blockoverlayfs.io/ephemeral-storage: '{"tiny":{"limit":"260Mi"},"zero":{"limit":"0"}}'
+spec:
+  nodeName: {{ .Node }}
+  terminationGracePeriodSeconds: 1
+  containers:
+    - {name: tiny, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sleep", "36000"]}
+    - {name: zero, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sleep", "36000"]}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: withinit
+  namespace: {{ .Namespace }}
+  labels:
+    blockoverlayfs.io/e2e: "true"
+  annotations:
+    blockoverlayfs.io/ephemeral-storage: '{"init":{"limit":"300Mi"},"main":{"request":"500Mi"}}'
+spec:
+  nodeName: {{ .Node }}
+  terminationGracePeriodSeconds: 1
+  initContainers:
+    # Its log is the size of its root filesystem while it ran.
+    - {name: init, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sh", "-c", "df -k / | tail -1"]}
+  containers:
+    - {name: main, image: "{{ .Image }}", imagePullPolicy: IfNotPresent, command: ["sleep", "36000"]}

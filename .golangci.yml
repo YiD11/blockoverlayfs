@@ -1,5 +1,10 @@
 version: "2"
 
+run:
+  # The e2e suite in test/e2e.
+  build-tags:
+    - e2e
+
 linters:
   enable:
     - copyloopvar

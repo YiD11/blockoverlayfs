@@ -1,0 +1,29 @@
+# A Pod whose ephemeral-storage limit kubelet enforces over the container's writable layer and the emptyDir
+# together.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: evict
+  namespace: {{ .Namespace }}
+  labels:
+    blockoverlayfs.io/e2e: "true"
+  annotations:
+    blockoverlayfs.io/ephemeral-storage: '{"c":{"limit":"512Mi"}}'
+spec:
+  nodeName: {{ .Node }}
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: c
+      image: {{ .Image }}
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "36000"]
+      resources:
+        limits:
+          ephemeral-storage: 512Mi
+      volumeMounts:
+        - name: scratch
+          mountPath: /scratch
+  volumes:
+    - name: scratch
+      emptyDir: {}

@@ -1,0 +1,19 @@
+# A container that says whether it started on an empty root filesystem, leaves a file in it and exits, for kubelet
+# to create the next one.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crash
+  namespace: {{ .Namespace }}
+  labels:
+    blockoverlayfs.io/e2e: "true"
+  annotations:
+    blockoverlayfs.io/ephemeral-storage: '{"c":{"limit":"400Mi"}}'
+spec:
+  nodeName: {{ .Node }}
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: c
+      image: {{ .Image }}
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "test -e /marker && echo STALE || echo FRESH; echo x > /marker; sleep 30; exit 1"]
