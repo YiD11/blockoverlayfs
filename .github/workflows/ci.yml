@@ -45,3 +45,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: make image
+      - run: make e2e-image

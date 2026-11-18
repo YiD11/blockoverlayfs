@@ -17,9 +17,10 @@ GO_LDFLAGS := -s -w -X $(PKG)/version.Version=$(VERSION) -X $(PKG)/version.Revis
 GO_BUILD := CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build -trimpath -ldflags "$(GO_LDFLAGS)"
 
 IMAGE ?= $(TARGET_BIN):$(VERSION)
+E2E_IMAGE ?= $(TARGET_BIN)-e2e:$(VERSION)
 CHART := charts/$(TARGET_BIN)
 
-.PHONY: all binaries image test test-root e2e-build e2e vet lint helm-lint tidy clean help
+.PHONY: all binaries image test test-root e2e-build e2e e2e-image vet lint helm-lint tidy clean help
 
 all: binaries
 
@@ -31,6 +32,7 @@ help:
 	@echo " * 'test'      - Run unit tests on the host platform."
 	@echo " * 'test-root' - Run the block layer tests on loop devices, ext4 and overlayfs (Linux, root)."
 	@echo " * 'e2e'       - Run the e2e suite against the plugin on the node E2E_NODE of the cluster kubectl points at."
+	@echo " * 'e2e-image' - Build the container image $(E2E_IMAGE) of the e2e suite with $(CONTAINER_TOOL)."
 	@echo " * 'vet'       - Run go vet for the host platform and for linux."
 	@echo " * 'lint'      - Run golangci-lint."
 	@echo " * 'helm-lint' - Lint and render the Helm chart."
@@ -60,12 +62,16 @@ e2e-build:
 
 # The suite runs on the cluster kubectl points at, against the plugin the cluster runs: E2E_NODE names the node to
 # test on, which runs it, and E2E_TEST_IMAGE the image of the suite's own Pods. E2E_LABELS, if set, is a Ginkgo label
-# filter over basic and load. hack/e2e-run.py runs this in a Pod of the cluster.
+# filter over basic and load.
 E2E_TEST_IMAGE ?= busybox:1.36
 e2e: e2e-build
 	cd test/e2e && E2E_TEST_IMAGE=$(E2E_TEST_IMAGE) \
 		$(CURDIR)/$(E2E_OUT)/e2e.test -test.timeout 2h -ginkgo.v -ginkgo.label-filter="$(E2E_LABELS)" \
 		-ginkgo.json-report=$(CURDIR)/$(E2E_OUT)/report.json
+
+# The suite built, with kubectl: hack/e2e-run.py runs it in Pods of a cluster.
+e2e-image:
+	$(CONTAINER_TOOL) build -f test/e2e/Dockerfile -t $(E2E_IMAGE) .
 
 vet:
 	$(GO) vet -tags e2e ./...

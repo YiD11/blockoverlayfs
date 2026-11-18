@@ -250,6 +250,7 @@ sudo -E env "PATH=$PATH" make test-root   # Linux and root: block layers on loop
 make helm-lint  # lint and render the chart
 make e2e        # the e2e suite, against the plugin on the node E2E_NODE of the cluster kubectl points at
 make image      # build the container image
+make e2e-image  # build the image of the e2e suite, which hack/e2e-run.py runs in Pods of a cluster
 ```
 
 Building needs Go 1.25 or newer.

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Runs the e2e suite of this checkout against the plugin a cluster runs, on nodes of the cluster kubectl points at,
-and reports on the run.
+"""Runs the e2e suite against the plugin a cluster runs, on nodes of the cluster kubectl points at, and reports on
+the run.
 
     hack/e2e-run.py run --out PREFIX
     hack/e2e-run.py render [--summary] PREFIX.json
 
-run creates a Pod in the cluster that builds the suite and runs it (hack/e2e-pod.sh), with a ServiceAccount that may
-do what the suite does, RULES, for as long as the run takes. It runs the groups of specs at once, each on a node of its own
-and in a Pod of its own, or all in one Pod if it has one node to run on. It follows the Pods to their end, fetches
-the suite's reports,
-deletes what the run created, and writes three files: PREFIX.md, a report to read; PREFIX.json, the same as data;
-PREFIX.log, the Pods' output. It exits 0 if the run allows a release and 1 if it does not. It needs python3 and
-kubectl.
+run creates a Pod of the suite's image, test/e2e/Dockerfile, which runs the suite (hack/e2e-pod.sh), with a
+ServiceAccount that may do what the suite does, RULES, for as long as the run takes. It runs the groups of specs at
+once, each on a node of its own and in a Pod of its own, or all in one Pod if it has one node to run on. It follows
+the Pods to their end, fetches the suite's reports, deletes what the run created, and writes three files: PREFIX.md,
+a report to read; PREFIX.json, the same as data; PREFIX.log, the Pods' output. It exits 0 if the run allows a
+release and 1 if it does not. It needs python3 and kubectl, and nothing else of the repository: the image has this
+script too.
 
 run deploys no plugin: the cluster is to run one, ready, on every node the run takes. The specs leave it, containerd
 and the node's other Pods alone, and no Pod of the run has a privilege on its node.
@@ -20,12 +20,12 @@ render prints the report of a PREFIX.json again, or the summary of it. It needs 
 
 run reads its settings from the environment:
 
+    E2E_IMAGE          the suite's image
     E2E_NODE           the nodes to test on, separated by commas; or
     E2E_NODE_SELECTOR  a label selector: run picks at random among the ready, schedulable nodes it selects that run
                        the plugin
-    E2E_TEST_IMAGE     the image of the suite's own Pods; busybox:1.36 if empty
+    E2E_TEST_IMAGE     the image of the suite's own Pods; busybox:1.36 beside E2E_IMAGE if empty
     E2E_NAMESPACE      the namespace of the Pods that run the suite; default if empty
-    E2E_REF            the branch or tag this checkout was asked for by, for the report
 """
 import argparse
 import datetime
@@ -42,7 +42,6 @@ import tarfile
 import tempfile
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
 GROUPS = ('basic', 'load')
 # The groups, from the one that takes longest: the order in which run deals them out.
 LONGEST_FIRST = ('load', 'basic')
@@ -55,7 +54,6 @@ ACCOUNT = 'blockoverlayfs-e2e'
 # suiteNamespace and suiteLabel in test/e2e/suite_test.go.
 SUITE_NAMESPACE = 'bofs-e2e'
 SUITE_KEY = 'blockoverlayfs.io/e2e'
-RUNNER_IMAGE = 'golang:1.25'
 # What kubectl does in the suite: it creates namespaces with Pods and a Deployment in them, runs commands in those
 # Pods, and reads the plugin's Pod, configuration and log, and the node.
 RULES = [
@@ -73,15 +71,15 @@ FAILED_STATES = ('failed', 'panicked', 'interrupted', 'aborted', 'timedout')
 VERDICTS = {'passed': '通过', 'failed': '失败', 'error': '没有跑完'}
 DECISIONS = {'allow': '放行', 'block': '阻断'}
 RESULTS = {'passed': '通过', 'failed': '失败', 'skipped': '跳过', 'not_run': '未运行'}
-STAGES = {'tools': 'Pod 里安装工具失败'}
 START = time.monotonic()
 BEGAN = datetime.datetime.now().astimezone()
 
 NODES = list(dict.fromkeys(n for n in re.split(r'[,\s]+', os.environ.get('E2E_NODE', '')) if n))
 SELECTOR = os.environ.get('E2E_NODE_SELECTOR', '').strip()
-TEST_IMAGE = os.environ.get('E2E_TEST_IMAGE', '').strip() or 'busybox:1.36'
+IMAGE = os.environ.get('E2E_IMAGE', '').strip()
+# Where the cluster pulls the suite's image from.
+TEST_IMAGE = os.environ.get('E2E_TEST_IMAGE', '').strip() or '/'.join(IMAGE.split('/')[:-1] + ['busybox:1.36'])
 NS = os.environ.get('E2E_NAMESPACE', '').strip() or 'default'
-REF = os.environ.get('E2E_REF', '').strip()
 
 
 def say(text):
@@ -108,17 +106,6 @@ def kubectl(*args, **kw):
     return p.stdout
 
 
-def checkout():
-    """Returns the commit of this checkout, None if it is not git's."""
-    try:
-        out = subprocess.run(('git', '-C', str(ROOT), 'log', '-1', '--format=%H%n%s'), stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, universal_newlines=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    lines = out.stdout.splitlines()
-    return {'id': lines[0], 'title': lines[1]} if out.returncode == 0 and len(lines) == 2 else None
-
-
 class Shard:
     """The part of a run that one node takes: one of the groups, or all of them, in a Pod of its own."""
 
@@ -132,7 +119,7 @@ class Shard:
         self.suite_namespace = SUITE_NAMESPACE + ('-' + name if name else '')
         # The Pod as the cluster had it last, and its output so far.
         self.obj, self.lines, self.phase = {}, [], ''
-        self.created = self.delivered = self.collected = self.over = False
+        self.created = self.collected = self.over = False
         self.began, self.seconds, self.misses, self.done, self.told = 0.0, 0, 0, 0, 0.0
         # What the Pod says of how it ended, or what went wrong.
         self.result, self.error = None, ''
@@ -197,18 +184,15 @@ def objects(shards):
             # Should this script not get to delete the Pod, the Pod ends by itself.
             'activeDeadlineSeconds': (POD_MINUTES + 5) * 60,
             'terminationGracePeriodSeconds': 10,
-            # Not on a node under test, which the build of the suite would load. A field selector on nodes takes one
-            # name for each requirement.
+            # Not on a node under test, which has no Pod of the run but the suite's own. A field selector on nodes
+            # takes one name for each requirement.
             'affinity': {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [
                 {'matchFields': [{'key': 'metadata.name', 'operator': 'NotIn', 'values': [t.node]} for t in shards]}]}}},
             'containers': [{
-                'name': 'suite', 'image': RUNNER_IMAGE,
-                # The checkout arrives once the Pod runs.
-                'command': ['sh', '-c', 'until [ -e /work/source-ready ]; do sleep 1; done; exec sh /work/src/hack/e2e-pod.sh'],
+                'name': 'suite', 'image': IMAGE,
                 'env': [{'name': 'E2E_NODE', 'value': s.node},
                         {'name': 'E2E_TEST_IMAGE', 'value': TEST_IMAGE}, {'name': 'E2E_LABELS', 'value': s.labels},
                         {'name': 'E2E_SUITE_NAMESPACE', 'value': s.suite_namespace}],
-                'resources': {'requests': {'cpu': '2', 'memory': '4Gi'}},
                 'volumeMounts': [{'name': 'work', 'mountPath': '/work'}],
             }],
             'volumes': [{'name': 'work', 'emptyDir': {}}],
@@ -224,17 +208,6 @@ def objects(shards):
     ] + pods}
 
 
-def deliver(name):
-    """Sends this checkout to the Pod, which waits for it."""
-    tar = subprocess.Popen(('tar', '-C', str(ROOT), '--exclude=.git', '--exclude=_output', '-cz', '.'), stdout=subprocess.PIPE)
-    p = subprocess.run(('kubectl', '--request-timeout=120s', '-n', NS, 'exec', '-i', name, '--', 'sh', '-c',
-                        'mkdir -p /work/src && tar -xz -C /work/src && touch /work/source-ready'),
-                       stdin=tar.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=150)
-    tar.stdout.close()
-    if tar.wait() or p.returncode:
-        raise RuntimeError('把源码送进 Pod 失败：' + p.stderr.decode(errors='replace')[-600:])
-
-
 def collect(name, out):
     """Fetches the Pod's /work/out. The Pod waits for that before it exits."""
     archive = out / 'pod-out.tgz'
@@ -248,15 +221,15 @@ def collect(name, out):
         for m in tar.getmembers():
             base = os.path.basename(m.name)
             # Regular files of the directory itself, under names this script chooses.
-            if m.isfile() and m.name in (base, './' + base) and base not in ('done', 'collected'):
+            if m.isfile() and m.name in (base, './' + base):
                 (out / base).write_bytes(tar.extractfile(m).read())
     archive.unlink()
     kubectl('-n', NS, 'exec', name, '--', 'touch', '/work/out/collected')
 
 
 def follow(s):
-    """Looks at a shard's Pod once: hands it the checkout once it runs, tells of its progress, fetches the suite's
-    report once there is one, and reads how the Pod ended once it has."""
+    """Looks at a shard's Pod once: tells of its progress, fetches the suite's report once there is one, and reads
+    how the Pod ended once it has."""
     try:
         s.obj = json.loads(kubectl('-n', NS, 'get', 'pod', s.pod, '-o', 'json'))
         s.misses = 0
@@ -270,9 +243,11 @@ def follow(s):
     if phase != s.phase:
         s.phase = phase
         say(s.tag + 'Pod 状态：' + phase)
-    if phase == 'Running' and not s.delivered:
-        deliver(s.pod)
-        s.delivered = True
+    for c in s.obj['status'].get('containerStatuses') or []:
+        waiting = (c.get('state') or {}).get('waiting') or {}
+        if waiting.get('reason') in ('ErrImagePull', 'ImagePullBackOff', 'InvalidImageName'):
+            # The kubelet goes on trying, to the Pod's deadline.
+            raise RuntimeError('节点拉不到镜像 %s（%s）' % (IMAGE, waiting.get('message') or waiting['reason']))
     try:
         lines = kubectl('-n', NS, 'logs', s.pod).splitlines()
     except (RuntimeError, subprocess.TimeoutExpired):
@@ -406,7 +381,7 @@ def judge(pod, counts, failures, succeeded):
             parts.append('套件的 %s 环节失败%s' % ('、'.join(nodes), '' if counts['passed'] else '，用例没有运行'))
         return 'failed', '，'.join(parts) or 'Ginkgo 的报告里套件未成功'
     if pod['exit'] != 0:
-        return 'error', 'make e2e 的退出码是 %s，而报告里没有失败的用例' % pod['exit']
+        return 'error', '套件的退出码是 %s，而报告里没有失败的用例' % pod['exit']
     if not counts['passed']:
         return 'error', '没有用例运行'
     return 'passed', ''
@@ -418,10 +393,8 @@ def conclude(prefix, shards, selected, error, leftovers):
     for s in shards:
         nodes, entries[s.node], succeeded, wrong = [], {}, False, s.error
         if not wrong and s.result:
-            if s.result['stage'] != 'suite':
-                wrong = STAGES.get(s.result['stage'], '停在 ' + s.result['stage'])
-            elif not (s.out / 'report.json').exists():
-                wrong = 'make e2e 以退出码 %s 结束，没有产出报告' % s.result['exit']
+            if not (s.out / 'report.json').exists():
+                wrong = '套件以退出码 %s 结束，没有产出报告' % s.result['exit']
             else:
                 nodes, entries[s.node], succeeded = read_report(s.out / 'report.json')
         for n in nodes:
@@ -461,7 +434,10 @@ def conclude(prefix, shards, selected, error, leftovers):
     return {
         'decision': decision, 'verdict': verdict, 'reason': reason,
         'started_at': BEGAN.isoformat(timespec='seconds'), 'seconds': int(time.monotonic() - START),
-        'ref': REF, 'commit': checkout(),
+        'suite_image': IMAGE,
+        # As the nodes that ran the suite's Pods have it.
+        'suite_image_id': '，'.join(dict.fromkeys(
+            c['imageID'] for s in shards for c in s.obj.get('status', {}).get('containerStatuses') or [] if c.get('imageID'))),
         'plugin': told('plugin'), 'plugin_image': told('plugin image'), 'running_image': told('plugin image id'),
         'nodes_from': 'selector' if selected else 'list',
         'shards': [{'groups': s.groups, 'labels': s.labels, 'node': s.node, 'node_info': entries[s.node].get('node', ''),
@@ -491,7 +467,7 @@ def block(text, limit, rest):
 def render(doc, full):
     """Returns the report in Markdown, or its summary: that cuts the failures short and leaves out what the suite
     wrote when a spec failed, and the list of specs."""
-    files, commit, shards = doc['files'], doc['commit'], doc['shards']
+    files, shards = doc['files'], doc['shards']
     many = len(shards) > 1
     lines = ['# blockoverlayfs e2e：%s' % VERDICTS[doc['verdict']], '',
              '**结论：%s**%s' % (DECISIONS[doc['decision']], '——' + doc['reason'] if doc['reason'] else ''), '']
@@ -512,8 +488,8 @@ def render(doc, full):
         return ['- %s：`%s`' % (name, value)] if value else []
 
     picked = '随机选中' if doc['nodes_from'] == 'selector' else '指定'
-    lines += fact('测试代码', '%s提交 %s：%s' % (doc['ref'] + '，' if doc['ref'] else '', commit['id'][:12], commit['title']) if commit else '')
-    lines += fact('集群里的插件', doc['plugin']) + fact('它的镜像', doc['plugin_image']) + fact('镜像的摘要', doc['running_image'])
+    lines += fact('套件的镜像', doc['suite_image']) + fact('套件镜像的摘要', doc['suite_image_id'])
+    lines += fact('集群里的插件', doc['plugin']) + fact('插件的镜像', doc['plugin_image']) + fact('插件镜像的摘要', doc['running_image'])
     if many:
         lines.append('- 测试节点：%d 个同时跑，%s' % (len(shards), picked))
         for s in shards:
@@ -583,6 +559,8 @@ def run(prefix):
     out = pathlib.Path(tempfile.mkdtemp())
     owned, shards, error, selected = [], [], '', True
     try:
+        if not IMAGE:
+            raise RuntimeError('E2E_IMAGE 没有给')
         kubectl('get', 'namespace', NS, '-o', 'name')
         busy = ['%s/%s' % (p['metadata']['namespace'], p['metadata']['name'])
                 for p in json.loads(kubectl('get', 'pods', '--all-namespaces', '-l', LABEL, '-o', 'json'))['items']
