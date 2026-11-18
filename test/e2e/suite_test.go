@@ -39,7 +39,7 @@ const (
 
 var (
 	// node is the node under test, and testImage the image of the suite's own Pods, which needs a shell, dd, df,
-	// wget and nsenter.
+	// stat, tail and wget.
 	node, testImage string
 
 	// suiteNamespace holds probePod. The namespaces of the specs are named after it.

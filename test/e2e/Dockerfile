@@ -16,6 +16,7 @@ RUN curl -fsSLO "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$TARGETARC
 	&& echo "$(curl -fsSL "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$TARGETARCH/kubectl.sha256")  kubectl" | sha256sum --check \
 	&& chmod +x kubectl
 
+# The suite's own Pods run from this image too, for its shell, dd, df, stat, tail and wget.
 FROM alpine:3.22
 COPY --from=build /src/_output/e2e/e2e.test /src/kubectl /usr/local/bin/
 # hack/e2e-run.py is here for whoever starts a run to take it from: it runs where kubectl administers the cluster.

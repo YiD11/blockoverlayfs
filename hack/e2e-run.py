@@ -20,11 +20,10 @@ render prints the report of a PREFIX.json again, or the summary of it. It needs 
 
 run reads its settings from the environment:
 
-    E2E_IMAGE          the suite's image
+    E2E_IMAGE          the suite's image, which the suite's own Pods run from too
     E2E_NODE           the nodes to test on, separated by commas; or
     E2E_NODE_SELECTOR  a label selector: run picks at random among the ready, schedulable nodes it selects that run
                        the plugin
-    E2E_TEST_IMAGE     the image of the suite's own Pods; busybox:1.36 beside E2E_IMAGE if empty
     E2E_NAMESPACE      the namespace of the Pods that run the suite; default if empty
 """
 import argparse
@@ -77,8 +76,6 @@ BEGAN = datetime.datetime.now().astimezone()
 NODES = list(dict.fromkeys(n for n in re.split(r'[,\s]+', os.environ.get('E2E_NODE', '')) if n))
 SELECTOR = os.environ.get('E2E_NODE_SELECTOR', '').strip()
 IMAGE = os.environ.get('E2E_IMAGE', '').strip()
-# Where the cluster pulls the suite's image from.
-TEST_IMAGE = os.environ.get('E2E_TEST_IMAGE', '').strip() or '/'.join(IMAGE.split('/')[:-1] + ['busybox:1.36'])
 NS = os.environ.get('E2E_NAMESPACE', '').strip() or 'default'
 
 
@@ -190,8 +187,9 @@ def objects(shards):
                 {'matchFields': [{'key': 'metadata.name', 'operator': 'NotIn', 'values': [t.node]} for t in shards]}]}}},
             'containers': [{
                 'name': 'suite', 'image': IMAGE,
+                # The suite's own Pods run from the image too: it has the shell tools they use.
                 'env': [{'name': 'E2E_NODE', 'value': s.node},
-                        {'name': 'E2E_TEST_IMAGE', 'value': TEST_IMAGE}, {'name': 'E2E_LABELS', 'value': s.labels},
+                        {'name': 'E2E_TEST_IMAGE', 'value': IMAGE}, {'name': 'E2E_LABELS', 'value': s.labels},
                         {'name': 'E2E_SUITE_NAMESPACE', 'value': s.suite_namespace}],
                 'volumeMounts': [{'name': 'work', 'mountPath': '/work'}],
             }],
