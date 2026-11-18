@@ -30,7 +30,7 @@ help:
 	@echo " * 'image'     - Build the container image $(IMAGE) with $(CONTAINER_TOOL)."
 	@echo " * 'test'      - Run unit tests on the host platform."
 	@echo " * 'test-root' - Run the block layer tests on loop devices, ext4 and overlayfs (Linux, root)."
-	@echo " * 'e2e'       - Run the e2e suite on the node E2E_NODE of the cluster kubectl points at (kubectl, helm)."
+	@echo " * 'e2e'       - Run the e2e suite against the plugin on the node E2E_NODE of the cluster kubectl points at."
 	@echo " * 'vet'       - Run go vet for the host platform and for linux."
 	@echo " * 'lint'      - Run golangci-lint."
 	@echo " * 'helm-lint' - Lint and render the Helm chart."
@@ -53,19 +53,17 @@ test-root:
 	$(GO) test $(ROOT_TESTFLAGS) -count=1 ./pkg/block/ -test.root
 
 # The suite runs where kubectl does, so it is built for the host, without cgo so that it runs whatever C library
-# the host has. The helper NRI plugin runs on the node.
+# the host has.
 E2E_OUT := _output/e2e
 e2e-build:
 	CGO_ENABLED=0 $(GO) test -c -tags e2e -o $(E2E_OUT)/e2e.test ./test/e2e/
-	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) $(GO) build -o $(E2E_OUT)/rejector ./test/e2e/rejector
 
-# The suite runs on the cluster kubectl points at: E2E_NODE names the node to test on, E2E_IMAGE the plugin image, in
-# a registry the node pulls from, and E2E_TEST_IMAGE the image of the suite's own Pods. E2E_LABELS, if set, is a
-# Ginkgo label filter over basic, config, restart and load. The suite reads the chart and its test data relative to
-# its own directory. hack/e2e-run.py runs this in a Pod of the cluster.
+# The suite runs on the cluster kubectl points at, against the plugin the cluster runs: E2E_NODE names the node to
+# test on, which runs it, and E2E_TEST_IMAGE the image of the suite's own Pods. E2E_LABELS, if set, is a Ginkgo label
+# filter over basic and load. hack/e2e-run.py runs this in a Pod of the cluster.
 E2E_TEST_IMAGE ?= busybox:1.36
 e2e: e2e-build
-	cd test/e2e && E2E_TEST_IMAGE=$(E2E_TEST_IMAGE) E2E_REJECTOR=$(CURDIR)/$(E2E_OUT)/rejector \
+	cd test/e2e && E2E_TEST_IMAGE=$(E2E_TEST_IMAGE) \
 		$(CURDIR)/$(E2E_OUT)/e2e.test -test.timeout 2h -ginkgo.v -ginkgo.label-filter="$(E2E_LABELS)" \
 		-ginkgo.json-report=$(CURDIR)/$(E2E_OUT)/report.json
 

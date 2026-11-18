@@ -12,7 +12,6 @@ spec:
     metadata:
       labels:
         app: churn
-        blockoverlayfs.io/e2e: "true"
       annotations:
         blockoverlayfs.io/ephemeral-storage: '{"c":{"limit":"600Mi"}}'
     spec:

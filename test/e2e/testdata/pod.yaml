@@ -5,27 +5,15 @@ metadata:
   namespace: {{ .Namespace }}
   labels:
     app: {{ .Name }}
-    {{- if not .Unselected }}
-    blockoverlayfs.io/e2e: "true"
-    {{- end }}
-    {{- range $key, $value := .Labels }}
-    {{ $key }}: {{ json $value }}
-    {{- end }}
+  {{- with .Storage }}
   annotations:
-    {{- with .Storage }}
     blockoverlayfs.io/ephemeral-storage: {{ json . }}
-    {{- end }}
-    {{- range $key, $value := .Annotations }}
-    {{ $key }}: {{ json $value }}
-    {{- end }}
+  {{- end }}
 spec:
   nodeName: {{ .Node }}
   terminationGracePeriodSeconds: 1
-  {{- with .RestartPolicy }}
-  restartPolicy: {{ . }}
-  {{- end }}
   containers:
     - name: c
       image: {{ .Image }}
       imagePullPolicy: IfNotPresent
-      command: {{ if .Command }}{{ json .Command }}{{ else }}["sleep", "36000"]{{ end }}
+      command: ["sleep", "36000"]

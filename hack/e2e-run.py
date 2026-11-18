@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
-"""Runs the e2e suite of this checkout on nodes of the cluster kubectl points at, and reports on the run.
+"""Runs the e2e suite of this checkout against the plugin a cluster runs, on nodes of the cluster kubectl points at,
+and reports on the run.
 
     hack/e2e-run.py run --out PREFIX
     hack/e2e-run.py render [--summary] PREFIX.json
 
-run creates a Pod in the cluster that builds the suite and runs it (hack/e2e-pod.sh), with a ServiceAccount that is
-bound to cluster-admin for as long as the run takes. With E2E_PARALLEL above 1 it deals the groups out to that many
-nodes, and runs them at once, a Pod for each node. It follows the Pods to their end, fetches the suite's reports,
+run creates a Pod in the cluster that builds the suite and runs it (hack/e2e-pod.sh), with a ServiceAccount that may
+do what the suite does, RULES, for as long as the run takes. It runs the groups of specs at once, each on a node of its own
+and in a Pod of its own, or all in one Pod if it has one node to run on. It follows the Pods to their end, fetches
+the suite's reports,
 deletes what the run created, and writes three files: PREFIX.md, a report to read; PREFIX.json, the same as data;
 PREFIX.log, the Pods' output. It exits 0 if the run allows a release and 1 if it does not. It needs python3 and
 kubectl.
 
-With E2E_RECONCILE, run runs no spec. It deploys the chart on those nodes instead, with enabled: false and the chart's
-own store, and waits for each plugin's reconciler to settle every layer in the store. The reconciler deletes the
-layers no container needs any more: those mounted nowhere, those whose mount holds no upper directory, and those
-whose container containerd does not have. It keeps the others. Then run takes the plugin away again. Such a run
-never allows a release, and exits 0 if every node was settled. It also needs helm.
+run deploys no plugin: the cluster is to run one, ready, on every node the run takes. The specs leave it, containerd
+and the node's other Pods alone, and no Pod of the run has a privilege on its node.
 
 render prints the report of a PREFIX.json again, or the summary of it. It needs no cluster.
 
 run reads its settings from the environment:
 
-    E2E_IMAGE          the plugin image to test, in a registry the nodes pull from
     E2E_NODE           the nodes to test on, separated by commas; or
-    E2E_NODE_SELECTOR  a label selector: run picks among the ready, schedulable nodes it selects at random
-    E2E_PARALLEL       on how many nodes at once to run the groups; 1 if empty. Only a run of every group is dealt
-                       out, and to no more nodes than there are to pick from
-    E2E_LABELS         a Ginkgo label filter over basic, config, restart and load; empty runs every group
+    E2E_NODE_SELECTOR  a label selector: run picks at random among the ready, schedulable nodes it selects that run
+                       the plugin
     E2E_TEST_IMAGE     the image of the suite's own Pods; busybox:1.36 if empty
     E2E_NAMESPACE      the namespace of the Pods that run the suite; default if empty
     E2E_REF            the branch or tag this checkout was asked for by, for the report
-    E2E_RECONCILE      the nodes to reconcile the layers of instead, separated by commas
 """
 import argparse
 import datetime
@@ -48,9 +43,11 @@ import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-GROUPS = ('basic', 'config', 'restart', 'load')
+GROUPS = ('basic', 'load')
 # The groups, from the one that takes longest: the order in which run deals them out.
-LONGEST_FIRST = ('config', 'restart', 'load', 'basic')
+LONGEST_FIRST = ('load', 'basic')
+# On the Pods of the plugin, as its chart labels them.
+PLUGIN = 'app.kubernetes.io/name=blockoverlayfs'
 # On what a run creates in the cluster.
 LABEL = 'app=blockoverlayfs-e2e'
 ACCOUNT = 'blockoverlayfs-e2e'
@@ -59,15 +56,19 @@ ACCOUNT = 'blockoverlayfs-e2e'
 SUITE_NAMESPACE = 'bofs-e2e'
 SUITE_KEY = 'blockoverlayfs.io/e2e'
 RUNNER_IMAGE = 'golang:1.25'
+# What kubectl does in the suite: it creates namespaces with Pods and a Deployment in them, runs commands in those
+# Pods, and reads the plugin's Pod, configuration and log, and the node.
+RULES = [
+    {'apiGroups': [''], 'resources': ['namespaces'], 'verbs': ['get', 'list', 'watch', 'create', 'patch', 'delete']},
+    {'apiGroups': [''], 'resources': ['pods'], 'verbs': ['get', 'list', 'watch', 'create', 'delete']},
+    {'apiGroups': [''], 'resources': ['pods/exec'], 'verbs': ['get', 'create']},
+    {'apiGroups': [''], 'resources': ['pods/log', 'configmaps', 'nodes'], 'verbs': ['get']},
+    {'apiGroups': [''], 'resources': ['events'], 'verbs': ['get', 'list']},
+    {'apiGroups': ['apps'], 'resources': ['deployments'], 'verbs': ['get', 'list', 'watch', 'create']},
+    {'apiGroups': ['apps'], 'resources': ['deployments/scale'], 'verbs': ['get', 'update', 'patch']},
+    {'apiGroups': ['apps'], 'resources': ['replicasets'], 'verbs': ['get', 'list', 'watch']},
+]
 POD_MINUTES = 45
-IMAGE_MINUTES = 15
-# A reconcile run deploys the chart in a namespace of its own, which carries SUITE_KEY like the suite's.
-RECONCILE_NAMESPACE = SUITE_NAMESPACE + '-reconcile'
-RELEASE = 'blockoverlayfs'
-RECONCILE_MINUTES = 30
-# Why the reconciler deletes a layer, as it logs it.
-REASONS = {'it is mounted nowhere': '没有挂载在任何地方', 'it holds no upper directory': '挂载着，但里面没有容器的 fs',
-           'it has no container': 'containerd 里已经没有它的容器'}
 FAILED_STATES = ('failed', 'panicked', 'interrupted', 'aborted', 'timedout')
 VERDICTS = {'passed': '通过', 'failed': '失败', 'error': '没有跑完'}
 DECISIONS = {'allow': '放行', 'block': '阻断'}
@@ -76,15 +77,11 @@ STAGES = {'tools': 'Pod 里安装工具失败'}
 START = time.monotonic()
 BEGAN = datetime.datetime.now().astimezone()
 
-IMAGE = os.environ.get('E2E_IMAGE', '').strip()
 NODES = list(dict.fromkeys(n for n in re.split(r'[,\s]+', os.environ.get('E2E_NODE', '')) if n))
 SELECTOR = os.environ.get('E2E_NODE_SELECTOR', '').strip()
-PARALLEL = os.environ.get('E2E_PARALLEL', '').strip() or '1'
-LABELS = os.environ.get('E2E_LABELS', '').strip()
 TEST_IMAGE = os.environ.get('E2E_TEST_IMAGE', '').strip() or 'busybox:1.36'
 NS = os.environ.get('E2E_NAMESPACE', '').strip() or 'default'
 REF = os.environ.get('E2E_REF', '').strip()
-RECONCILE = list(dict.fromkeys(n for n in re.split(r'[,\s]+', os.environ.get('E2E_RECONCILE', '')) if n))
 
 
 def say(text):
@@ -123,14 +120,14 @@ def checkout():
 
 
 class Shard:
-    """The part of a run that one node takes: some of the groups, or all of them, in a Pod of its own."""
+    """The part of a run that one node takes: one of the groups, or all of them, in a Pod of its own."""
 
     def __init__(self, run, groups, node, out):
         # The one shard of a run that is not dealt out has no groups, and the names of the run itself.
         self.groups, self.node, self.out = groups, node, out
         name = '-'.join(groups)
         self.tag = '[%s] ' % name if name else ''
-        self.labels = ' || '.join(groups) if groups else LABELS
+        self.labels = ' || '.join(groups)
         self.pod = run + ('-' + name if name else '')
         self.suite_namespace = SUITE_NAMESPACE + ('-' + name if name else '')
         # The Pod as the cluster had it last, and its output so far.
@@ -141,33 +138,32 @@ class Shard:
         self.result, self.error = None, ''
 
 
-class Target:
-    """A node of a reconcile run, and what the plugin's reconciler did there."""
-
-    def __init__(self, node, out):
-        self.node, self.out, self.tag = node, out, '[%s] ' % node
-        self.pod, self.image, self.lines = '', '', []
-        self.began, self.seconds, self.told = time.monotonic(), 0, 0.0
-        # The reconciler's runs so far; what the last one kept and left unsettled, None before the first.
-        self.runs, self.kept, self.unsettled = 0, None, None
-        self.reasons, self.warnings = {}, []
-        self.over, self.error = False, ''
+def ready(obj):
+    """Whether a node or a Pod is ready."""
+    return any(c['type'] == 'Ready' and c['status'] == 'True' for c in obj['status'].get('conditions') or [])
 
 
 def candidates():
-    """Returns the nodes the run may take, and whether the selector chose them."""
+    """Returns the nodes the run may take, and whether the selector chose them. Each runs the cluster's plugin."""
+    plugins = {p['spec'].get('nodeName') for p in
+               json.loads(kubectl('get', 'pods', '--all-namespaces', '-l', PLUGIN, '-o', 'json'))['items'] if ready(p)}
     if NODES:
         for n in NODES:
             kubectl('get', 'node', n, '-o', 'name')
+        without = [n for n in NODES if n not in plugins]
+        if without:
+            raise RuntimeError('这些节点上没有就绪的 blockoverlayfs，集群要先部署好它：' + '、'.join(without))
         return NODES, False
     if not SELECTOR:
         raise RuntimeError('E2E_NODE 和 E2E_NODE_SELECTOR 都没有给')
     fit = [n['metadata']['name'] for n in json.loads(kubectl('get', 'nodes', '-l', SELECTOR, '-o', 'json'))['items']
-           if not n['spec'].get('unschedulable')
-           and any(c['type'] == 'Ready' and c['status'] == 'True' for c in n['status'].get('conditions') or [])]
+           if not n['spec'].get('unschedulable') and ready(n)]
     if not fit:
         raise RuntimeError('选择器 %s 没有选中 Ready 且可调度的节点' % SELECTOR)
-    return fit, True
+    with_plugin = [n for n in fit if n in plugins]
+    if not with_plugin:
+        raise RuntimeError('选择器 %s 选中的 %d 个节点上都没有就绪的 blockoverlayfs，集群要先部署好它' % (SELECTOR, len(fit)))
+    return with_plugin, True
 
 
 def deal(count):
@@ -190,40 +186,8 @@ def why(pod):
     return '，'.join(p for p in parts if p)[:400]
 
 
-def image_version(name, node, owned):
-    """Waits for the node to have pulled the plugin image, and returns the version the plugin in it reports."""
-    pod = {
-        'apiVersion': 'v1', 'kind': 'Pod',
-        'metadata': {'name': name, 'namespace': NS, 'labels': dict([LABEL.split('=')])},
-        'spec': {
-            'nodeName': node, 'restartPolicy': 'Never', 'automountServiceAccountToken': False,
-            'terminationGracePeriodSeconds': 1,
-            'containers': [{'name': 'version', 'image': IMAGE, 'command': ['blockoverlayfs', '-version']}],
-        },
-    }
-    owned.append(('pod', name))
-    kubectl('create', '-f', '-', stdin=json.dumps(pod))
-    deadline, told = time.monotonic() + IMAGE_MINUTES * 60, False
-    while True:
-        try:
-            pod = json.loads(kubectl('-n', NS, 'get', 'pod', name, '-o', 'json'))
-        except (RuntimeError, subprocess.TimeoutExpired):
-            pod = {}
-        phase = pod.get('status', {}).get('phase')
-        if phase == 'Succeeded':
-            return kubectl('-n', NS, 'logs', name).strip()
-        if phase == 'Failed':
-            raise RuntimeError('镜像 %s 里的插件报不出版本（%s）' % (IMAGE, why(pod)))
-        if time.monotonic() > deadline:
-            raise RuntimeError('节点 %s 在 %d 分钟内没有拉到镜像 %s（%s）' % (node, IMAGE_MINUTES, IMAGE, why(pod)))
-        if not told and 'ImagePull' in why(pod):
-            say('镜像还拉不到，最多等 %d 分钟：%s' % (IMAGE_MINUTES, IMAGE))
-            told = True
-        time.sleep(10)
-
-
 def objects(shards):
-    """What runs the suite: a Pod for each shard, and the access to the cluster that kubectl and helm in them have."""
+    """What runs the suite: a Pod for each shard, and the access to the cluster that kubectl in them has."""
     labels = dict([LABEL.split('=')])
     pods = [{
         'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': s.pod, 'namespace': NS, 'labels': labels},
@@ -233,15 +197,15 @@ def objects(shards):
             # Should this script not get to delete the Pod, the Pod ends by itself.
             'activeDeadlineSeconds': (POD_MINUTES + 5) * 60,
             'terminationGracePeriodSeconds': 10,
-            # Not on a node under test: the suite restarts containerd there, which cuts the Pod's log off. A field
-            # selector on nodes takes one name for each requirement.
+            # Not on a node under test, which the build of the suite would load. A field selector on nodes takes one
+            # name for each requirement.
             'affinity': {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [
                 {'matchFields': [{'key': 'metadata.name', 'operator': 'NotIn', 'values': [t.node]} for t in shards]}]}}},
             'containers': [{
                 'name': 'suite', 'image': RUNNER_IMAGE,
                 # The checkout arrives once the Pod runs.
                 'command': ['sh', '-c', 'until [ -e /work/source-ready ]; do sleep 1; done; exec sh /work/src/hack/e2e-pod.sh'],
-                'env': [{'name': 'E2E_NODE', 'value': s.node}, {'name': 'E2E_IMAGE', 'value': IMAGE},
+                'env': [{'name': 'E2E_NODE', 'value': s.node},
                         {'name': 'E2E_TEST_IMAGE', 'value': TEST_IMAGE}, {'name': 'E2E_LABELS', 'value': s.labels},
                         {'name': 'E2E_SUITE_NAMESPACE', 'value': s.suite_namespace}],
                 'resources': {'requests': {'cpu': '2', 'memory': '4Gi'}},
@@ -251,9 +215,11 @@ def objects(shards):
         }} for s in shards]
     return {'apiVersion': 'v1', 'kind': 'List', 'items': [
         {'apiVersion': 'v1', 'kind': 'ServiceAccount', 'metadata': {'name': ACCOUNT, 'namespace': NS, 'labels': labels}},
+        {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'ClusterRole',
+         'metadata': {'name': ACCOUNT, 'labels': labels}, 'rules': RULES},
         {'apiVersion': 'rbac.authorization.k8s.io/v1', 'kind': 'ClusterRoleBinding',
          'metadata': {'name': ACCOUNT, 'labels': labels},
-         'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'ClusterRole', 'name': 'cluster-admin'},
+         'roleRef': {'apiGroup': 'rbac.authorization.k8s.io', 'kind': 'ClusterRole', 'name': ACCOUNT},
          'subjects': [{'kind': 'ServiceAccount', 'name': ACCOUNT, 'namespace': NS}]},
     ] + pods}
 
@@ -338,7 +304,8 @@ def follow(s):
 def run_suites(shards, owned):
     """Runs the suite in a Pod for each shard, and follows the Pods to their end. A shard that goes wrong ends there,
     and the others go on."""
-    owned += [('serviceaccount', ACCOUNT), ('clusterrolebinding', ACCOUNT)] + [('pod', s.pod) for s in shards]
+    owned += [('serviceaccount', ACCOUNT), ('clusterrole', ACCOUNT), ('clusterrolebinding', ACCOUNT)]
+    owned += [('pod', s.pod) for s in shards]
     kubectl('create', '-f', '-', stdin=json.dumps(objects(shards)))
     for s in shards:
         s.created, s.began = True, time.monotonic()
@@ -359,120 +326,6 @@ def run_suites(shards, owned):
                 say(s.tag + '出错：' + s.error)
             if s.over:
                 s.seconds = int(time.monotonic() - s.began)
-
-
-def watch(t, pods):
-    """Looks at the plugin on a target's node once, and reads from its log what its reconciler did."""
-    pod = next((p for p in pods if p['spec'].get('nodeName') == t.node), None)
-    if not pod:
-        return
-    if pod['metadata']['name'] != t.pod:
-        t.pod = pod['metadata']['name']
-        say('%s插件的 Pod：%s/%s' % (t.tag, RECONCILE_NAMESPACE, t.pod))
-    statuses = pod['status'].get('containerStatuses') or [{}]
-    t.image = statuses[0].get('imageID', '')
-    if statuses[0].get('restartCount'):
-        raise RuntimeError('插件重启过（%s）' % why(pod))
-    try:
-        t.lines = kubectl('-n', RECONCILE_NAMESPACE, 'logs', t.pod).splitlines()
-    except (RuntimeError, subprocess.TimeoutExpired):
-        return
-    # The plugin logs as logrus's text formatter does: time="…" level=info msg="…" key=value …
-    t.runs, t.reasons, t.warnings = 0, {}, []
-    for line in t.lines:
-        msg = re.search(r'\bmsg="((?:[^"\\]|\\.)*)"', line)
-        if not msg:
-            continue
-        if msg.group(1) == 'deleted a block writable layer':
-            reason = re.search(r'\breason="((?:[^"\\]|\\.)*)"', line)
-            reason = reason.group(1) if reason else ''
-            t.reasons[reason] = t.reasons.get(reason, 0) + 1
-        elif msg.group(1) == 'reconciled block writable layers':
-            fields = dict(re.findall(r'\b(layers|unsettled)=(\d+)', line))
-            t.runs, t.unsettled = t.runs + 1, int(fields.get('unsettled', 0))
-            t.kept = int(fields.get('layers', 0)) - t.unsettled
-        elif re.search(r'\blevel=(warning|error|fatal)\b', line):
-            t.warnings.append(line[:400])
-    deleted = sum(t.reasons.values())
-    if t.runs and t.unsettled == 0:
-        t.over = True
-        say('%sreconcile 完了：删掉 %d 个块层，留下 %d 个' % (t.tag, deleted, t.kept))
-    elif time.monotonic() - t.told > 60:
-        t.told = time.monotonic()
-        say('%s已删掉 %d 个块层%s' % (t.tag, deleted, '，上一轮还有 %d 个没处理完' % t.unsettled if t.runs else ''))
-
-
-def reconcile(targets, owned):
-    """Deploys the chart with enabled: false on the targets' nodes, and follows each plugin until a run of its
-    reconciler leaves no layer unsettled. A node that goes wrong ends there, and the others go on."""
-    for t in targets:
-        node = json.loads(kubectl('get', 'node', t.node, '-o', 'json'))
-        if not any(c['type'] == 'Ready' and c['status'] == 'True' for c in node['status'].get('conditions') or []):
-            raise RuntimeError('节点 %s 不是 Ready' % t.node)
-        # Two plugins on a node would both act on its containers.
-        there = kubectl('get', 'pods', '--all-namespaces', '-l', 'app.kubernetes.io/name=blockoverlayfs',
-                        '--field-selector', 'spec.nodeName=' + t.node,
-                        '-o', 'jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name} {end}').strip()
-        if there:
-            raise RuntimeError('节点 %s 上已经有 blockoverlayfs：%s' % (t.node, there))
-
-    owned.append(('namespace', RECONCILE_NAMESPACE))
-    kubectl('create', '-f', '-', stdin=json.dumps({'apiVersion': 'v1', 'kind': 'Namespace', 'metadata': {
-        'name': RECONCILE_NAMESPACE, 'labels': {SUITE_KEY: RECONCILE_NAMESPACE}}}))
-    name, _, tag = IMAGE.rpartition(':')
-    values = {
-        'image': {'registry': '', 'name': name, 'tag': tag},
-        'config': {'enabled': False},
-        # The cluster may lack the ServiceMonitor's CRD.
-        'serviceMonitor': {'enabled': False},
-        # The Pods of a run are what tells another run that this one is in progress.
-        'podLabels': dict([LABEL.split('=')]),
-        # A field selector on nodes takes one name for each requirement: a term for each node.
-        'affinity': {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [
-            {'matchFields': [{'key': 'metadata.name', 'operator': 'In', 'values': [t.node]}]} for t in targets]}}},
-    }
-    with tempfile.NamedTemporaryFile('w', suffix='.json') as f:
-        json.dump(values, f)
-        f.flush()
-        try:
-            p = subprocess.run(('helm', 'upgrade', '--install', RELEASE, str(ROOT / 'charts' / 'blockoverlayfs'),
-                                '--namespace', RECONCILE_NAMESPACE, '--values', f.name),
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=180)
-        except OSError as exc:
-            raise RuntimeError('运行 helm 失败：%s' % exc)
-    if p.returncode:
-        raise RuntimeError('helm upgrade --install：' + p.stderr.strip()[-600:])
-    for t in targets:
-        t.began = time.monotonic()
-    say('已在命名空间 %s 部署 enabled: false 的插件：%s' % (RECONCILE_NAMESPACE, '、'.join(t.node for t in targets)))
-
-    deadline = time.monotonic() + RECONCILE_MINUTES * 60
-    try:
-        while not all(t.over for t in targets):
-            time.sleep(10)
-            try:
-                pods = json.loads(kubectl('-n', RECONCILE_NAMESPACE, 'get', 'pods', '-l',
-                                          'app.kubernetes.io/instance=' + RELEASE, '-o', 'json'))['items']
-            except (RuntimeError, subprocess.TimeoutExpired):
-                # The API does not answer now and then; the deadline ends the wait.
-                pods = []
-            for t in targets:
-                if t.over:
-                    continue
-                try:
-                    if time.monotonic() > deadline:
-                        raise RuntimeError('%d 分钟内没有 reconcile 完%s' % (RECONCILE_MINUTES, '' if t.unsettled is None
-                                           else '，最后一轮还有 %d 个块层没处理完' % t.unsettled))
-                    watch(t, pods)
-                except (RuntimeError, subprocess.TimeoutExpired, ValueError) as exc:
-                    t.error, t.over = str(exc), True
-                    say(t.tag + '出错：' + t.error)
-                if t.over:
-                    t.seconds = int(time.monotonic() - t.began)
-    finally:
-        for t in targets:
-            if t.lines:
-                (t.out / 'plugin.log').write_text('\n'.join(t.lines) + '\n')
 
 
 def cleanup(shards, owned):
@@ -559,7 +412,7 @@ def judge(pod, counts, failures, succeeded):
     return 'passed', ''
 
 
-def conclude(prefix, shards, selected, parallel, version, error, leftovers):
+def conclude(prefix, shards, selected, error, leftovers):
     """Reads the suite's reports and returns everything there is to say of the run. The files are written from it."""
     specs, failures, entries = {}, [], {}
     for s in shards:
@@ -593,29 +446,30 @@ def conclude(prefix, shards, selected, parallel, version, error, leftovers):
     else:
         verdict = next(v for v in ('failed', 'error', 'passed') if any(s.verdict == v for s in shards))
         reason = '；'.join(s.tag + s.reason for s in shards if s.verdict != 'passed')
-    decision = 'allow' if verdict == 'passed' and not LABELS else 'block'
-    if verdict == 'passed' and decision == 'block':
-        reason = '只跑了 %s，四组全部通过才放行' % LABELS
+    decision = 'allow' if verdict == 'passed' else 'block'
 
     tail = []
     for s in shards:
         if s.verdict == 'error' and (s.out / 'pod.log').exists():
             tail += [s.tag + l[:200] for l in (s.out / 'pod.log').read_text(errors='replace').splitlines()[-25:]]
     tools = next((s.result for s in shards if s.result), {})
-    images = [entries[s.node].get('plugin image', '') for s in shards]
+
+    def told(entry):
+        """What the suites recorded under a name, without repeats."""
+        return '，'.join(dict.fromkeys(v for v in (entries[s.node].get(entry, '') for s in shards) if v))
+
     return {
         'decision': decision, 'verdict': verdict, 'reason': reason,
         'started_at': BEGAN.isoformat(timespec='seconds'), 'seconds': int(time.monotonic() - START),
         'ref': REF, 'commit': checkout(),
-        'image': IMAGE, 'running_image': '，'.join(dict.fromkeys(i for i in images if i)), 'plugin_version': version,
+        'plugin': told('plugin'), 'plugin_image': told('plugin image'), 'running_image': told('plugin image id'),
         'nodes_from': 'selector' if selected else 'list',
-        'parallel': parallel,
         'shards': [{'groups': s.groups, 'labels': s.labels, 'node': s.node, 'node_info': entries[s.node].get('node', ''),
-                    'running_image': entries[s.node].get('plugin image', ''),
+                    'plugin': entries[s.node].get('plugin', ''), 'running_image': entries[s.node].get('plugin image id', ''),
                     'pod': s.pod if s.created else '', 'suite_namespace': s.suite_namespace, 'seconds': s.seconds,
                     'verdict': s.verdict, 'reason': s.reason} for s in shards],
-        'tools': {k: tools[k] for k in ('kubectl', 'helm') if k in tools},
-        'labels': LABELS, 'namespace': NS,
+        'tools': {k: tools[k] for k in ('kubectl',) if k in tools},
+        'namespace': NS,
         'counts': counts,
         'groups': {g: tally([s for s in specs if s['group'] == g]) for g in GROUPS},
         'failures': [{k: n[k] for k in ('kind', 'group', 'name', 'node', 'state', 'location', 'message', 'output')}
@@ -625,72 +479,6 @@ def conclude(prefix, shards, selected, parallel, version, error, leftovers):
         'log_tail': tail,
         'files': {k: prefix.name + suffix for k, suffix in (('report', '.md'), ('result', '.json'), ('log', '.log'))},
     }
-
-
-def conclude_reconcile(prefix, targets, version, error, leftovers):
-    """Returns everything there is to say of a reconcile run."""
-    for t in targets:
-        t.verdict = 'passed' if t.unsettled == 0 and not t.error else 'error'
-        t.reason = t.error or ('' if t.verdict == 'passed' else '插件没有 reconcile 完' if t.pod else '插件没有部署上')
-    if error or not targets:
-        verdict, reason = 'error', error
-    else:
-        verdict = 'error' if any(t.verdict != 'passed' for t in targets) else 'passed'
-        reason = '；'.join(t.tag + t.reason for t in targets if t.verdict != 'passed') or '这次只清理块层，没有跑用例'
-    return {
-        'mode': 'reconcile',
-        'decision': 'block', 'verdict': verdict, 'reason': reason,
-        'started_at': BEGAN.isoformat(timespec='seconds'), 'seconds': int(time.monotonic() - START),
-        'ref': REF, 'commit': checkout(),
-        'image': IMAGE, 'running_image': '，'.join(dict.fromkeys(t.image for t in targets if t.image)),
-        'plugin_version': version, 'namespace': RECONCILE_NAMESPACE,
-        'counts': dict(total=0, **tally([])),
-        'nodes': [{'node': t.node, 'pod': t.pod, 'seconds': t.seconds, 'runs': t.runs,
-                   'deleted': sum(t.reasons.values()), 'reasons': t.reasons, 'kept': t.kept, 'unsettled': t.unsettled,
-                   'warnings': t.warnings, 'verdict': t.verdict, 'reason': t.reason} for t in targets],
-        'not_cleaned': leftovers,
-        'files': {k: prefix.name + suffix for k, suffix in (('report', '.md'), ('result', '.json'), ('log', '.log'))},
-    }
-
-
-def render_reconcile(doc, full):
-    """Returns the report of a reconcile run in Markdown, or its summary: that leaves out the plugins' warnings."""
-    files = doc['files']
-    lines = ['# blockoverlayfs 块层清理：%s' % ('完成' if doc['verdict'] == 'passed' else '没有做完'), '',
-             '**结论：%s**——%s' % (DECISIONS[doc['decision']], doc['reason']), '',
-             '在这些节点上临时部署 enabled: false 的插件，由它的 reconcile 删掉 store 里不再有容器要用的块层，做完就卸掉。', '']
-    deployed = any(n['pod'] for n in doc['nodes'])
-    if deployed:
-        lines += ['| 节点 | 删掉的块层 | 留下的块层（容器还在） | 没处理完的 | 用时 |', '|---|---|---|---|---|']
-        lines += ['| %s | %d | %s | %s | %s |' % (n['node'], n['deleted'], '–' if n['kept'] is None else n['kept'],
-                                                '–' if n['unsettled'] is None else n['unsettled'], span(n['seconds']))
-                  for n in doc['nodes']] + ['']
-    reasons = {}
-    for n in doc['nodes']:
-        for r, count in n['reasons'].items():
-            reasons[r] = reasons.get(r, 0) + count
-    if reasons:
-        lines += ['删掉的块层：', ''] + ['- %s：%d 个' % (REASONS.get(r, r), c) for r, c in sorted(reasons.items())] + ['']
-    wrong = ['- %s：%s' % (n['node'], n['reason']) for n in doc['nodes'] if n['verdict'] != 'passed']
-    if deployed and wrong:
-        lines += ['没有做完的节点：', ''] + wrong + ['']
-
-    def fact(name, value):
-        return ['- %s：`%s`' % (name, value)] if value else []
-
-    commit = doc['commit']
-    lines += fact('代码', '%s提交 %s：%s' % (doc['ref'] + '，' if doc['ref'] else '', commit['id'][:12], commit['title']) if commit else '')
-    lines += fact('插件镜像', doc['image']) + fact('节点上运行的镜像', doc['running_image'])
-    lines += fact('插件自报的版本', doc['plugin_version']) + fact('部署在命名空间', doc['namespace'] if deployed else '')
-    lines += fact('开始时间', '%s，共 %s' % (doc['started_at'].replace('T', ' '), span(doc['seconds'])))
-    lines += fact('没有清理掉', '；'.join(doc['not_cleaned'])) + ['']
-    warnings = [n['node'] + ' ' + w for n in doc['nodes'] for w in n['warnings']]
-    if full and warnings:
-        lines += ['## 插件的警告', ''] + block('\n'.join(warnings), 20000, files['log'])
-    if full:
-        lines += ['## 同一次运行的其他文件', '', '- `%s`：这份报告的结构化版本。' % files['result'],
-                  '- `%s`：各节点上插件的完整日志。' % files['log'], '']
-    return '\n'.join(lines)
 
 
 def block(text, limit, rest):
@@ -703,12 +491,9 @@ def block(text, limit, rest):
 def render(doc, full):
     """Returns the report in Markdown, or its summary: that cuts the failures short and leaves out what the suite
     wrote when a spec failed, and the list of specs."""
-    if doc.get('mode') == 'reconcile':
-        return render_reconcile(doc, full)
     files, commit, shards = doc['files'], doc['commit'], doc['shards']
     many = len(shards) > 1
-    scope = '（只跑 %s）' % doc['labels'] if doc['labels'] else ''
-    lines = ['# blockoverlayfs e2e%s：%s' % (scope, VERDICTS[doc['verdict']]), '',
+    lines = ['# blockoverlayfs e2e：%s' % VERDICTS[doc['verdict']], '',
              '**结论：%s**%s' % (DECISIONS[doc['decision']], '——' + doc['reason'] if doc['reason'] else ''), '']
 
     def ran_on(group):
@@ -728,8 +513,7 @@ def render(doc, full):
 
     picked = '随机选中' if doc['nodes_from'] == 'selector' else '指定'
     lines += fact('测试代码', '%s提交 %s：%s' % (doc['ref'] + '，' if doc['ref'] else '', commit['id'][:12], commit['title']) if commit else '')
-    lines += fact('被测镜像', doc['image']) + fact('节点上运行的镜像', doc['running_image'])
-    lines += fact('插件自报的版本', doc['plugin_version'])
+    lines += fact('集群里的插件', doc['plugin']) + fact('它的镜像', doc['plugin_image']) + fact('镜像的摘要', doc['running_image'])
     if many:
         lines.append('- 测试节点：%d 个同时跑，%s' % (len(shards), picked))
         for s in shards:
@@ -738,9 +522,7 @@ def render(doc, full):
                                               '' if s['verdict'] == 'passed' else '，' + VERDICTS[s['verdict']]))
     elif shards:
         lines += fact('测试节点', '%s（%s）' % (shards[0]['node_info'] or shards[0]['node'], picked))
-    if doc['parallel']['note']:
-        lines += fact('并行', '要求 %d 个节点，用了 %d 个：%s' % (doc['parallel']['asked'], len(shards), doc['parallel']['note']))
-    lines += fact('工具', '，'.join('%s %s' % (k, doc['tools'][k]) for k in ('kubectl', 'helm') if k in doc['tools']))
+    lines += fact('工具', '，'.join('%s %s' % (k, v) for k, v in doc['tools'].items()))
     if not many and shards and shards[0]['pod']:
         lines += fact('运行套件的 Pod', '%s/%s' % (doc['namespace'], shards[0]['pod']))
     lines += fact('开始时间', '%s，共 %s' % (doc['started_at'].replace('T', ' '), span(doc['seconds'])))
@@ -782,76 +564,45 @@ def render(doc, full):
     return text
 
 
-def write(prefix, doc, parts):
-    """Writes the report, the result and the log. parts are the run's shards, or its targets."""
+def write(prefix, doc, shards):
+    """Writes the report, the result and the log."""
     prefix.parent.mkdir(parents=True, exist_ok=True)
     pathlib.Path(str(prefix) + '.md').write_text(render(doc, True) + '\n')
     pathlib.Path(str(prefix) + '.json').write_text(json.dumps(doc, ensure_ascii=False, indent=2) + '\n')
     logs = []
-    for s in parts:
+    for s in shards:
         for title, filename in (('Pod %s/%s 的输出' % (NS, s.pod), 'pod.log'),
-                                ('插件 Pod %s/%s 的日志' % (RECONCILE_NAMESPACE, s.pod), 'plugin.log'),
                                 ('kubectl describe pod %s' % s.pod, 'describe.txt'), ('Pod %s 的事件' % s.pod, 'events.txt')):
             if (s.out / filename).exists():
                 logs.append('==== %s%s ====\n%s\n' % (s.tag, title, (s.out / filename).read_text(errors='replace').rstrip('\n')))
-    pathlib.Path(str(prefix) + '.log').write_text('\n'.join(logs) or '运行套件或插件的 Pod 没有建出来，所以没有日志。\n')
+    pathlib.Path(str(prefix) + '.log').write_text('\n'.join(logs) or '运行套件的 Pod 没有建出来，所以没有日志。\n')
 
 
 def run(prefix):
     name = 'blockoverlayfs-e2e-' + BEGAN.strftime('%Y%m%d-%H%M%S')
     out = pathlib.Path(tempfile.mkdtemp())
-    owned, shards, targets, error, selected, version = [], [], [], '', True, ''
-    parallel = {'asked': 0, 'note': ''}
+    owned, shards, error, selected = [], [], '', True
     try:
-        tag = IMAGE.rsplit('/', 1)[-1].partition(':')[2]
-        if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._/:-]+', IMAGE) or tag in ('', 'latest'):
-            raise RuntimeError('E2E_IMAGE 要是带明确 tag 的镜像地址，不能是 latest：' + IMAGE)
-        if not PARALLEL.isdigit() or int(PARALLEL) < 1:
-            raise RuntimeError('E2E_PARALLEL 要是正整数：' + PARALLEL)
-        parallel['asked'] = int(PARALLEL)
         kubectl('get', 'namespace', NS, '-o', 'name')
         busy = ['%s/%s' % (p['metadata']['namespace'], p['metadata']['name'])
                 for p in json.loads(kubectl('get', 'pods', '--all-namespaces', '-l', LABEL, '-o', 'json'))['items']
                 if p['status'].get('phase') in ('Pending', 'Running')]
         if busy:
-            # Two runs would deploy the plugin, and tell it what to do, in each other's way.
+            # Two runs would use the same namespaces.
             raise RuntimeError('已有一次运行在进行：' + ' '.join(busy))
         # What a run that was killed left behind.
         kubectl('-n', NS, 'delete', 'pods,serviceaccounts', '-l', LABEL, '--ignore-not-found', timeout=150)
-        kubectl('delete', 'clusterrolebindings', '-l', LABEL, '--ignore-not-found')
+        kubectl('delete', 'clusterrolebindings,clusterroles', '-l', LABEL, '--ignore-not-found')
         kubectl('delete', 'namespaces', '-l', SUITE_KEY, '--timeout=300s', timeout=330)
 
-        if RECONCILE:
-            say('只清理块层，不跑用例：%s' % '、'.join(RECONCILE))
-            for node in RECONCILE:
-                targets.append(Target(node, out / node))
-                targets[-1].out.mkdir()
-            first = RECONCILE[0]
-        else:
-            nodes, selected = candidates()
-            count = parallel['asked']
-            for most, note in ((1 if LABELS else len(GROUPS), '只跑 %s，不拆开' % LABELS if LABELS else '只有 %d 组' % len(GROUPS)),
-                               (len(nodes), '可选的节点只有 %d 个' % len(nodes))):
-                if most < count:
-                    count, parallel['note'] = most, note
-            if parallel['note']:
-                say('要求 %d 个节点同时跑，用 %d 个：%s' % (parallel['asked'], count, parallel['note']))
-            for groups, node in zip(deal(count) if count > 1 else [[]], random.sample(nodes, count)):
-                shards.append(Shard(name, groups, node, out / node))
-                shards[-1].out.mkdir()
-                say('%s测试节点：%s（%s）' % (shards[-1].tag, node, '随机选中' if selected else '指定'))
-            first = shards[0].node
-
-        version = image_version(name + '-image', first, owned)
-        say('节点拉到了镜像 %s，插件自报的版本：%s' % (IMAGE, version))
-        commit = checkout()
-        built = re.search(r'\b[0-9a-f]{40}\b', version)
-        if commit and built and built.group() != commit['id']:
-            raise RuntimeError('镜像是提交 %s 构建的，不是这份源码的提交 %s' % (built.group(), commit['id']))
-        if RECONCILE:
-            reconcile(targets, owned)
-        else:
-            run_suites(shards, owned)
+        nodes, selected = candidates()
+        # A node for each group. With one node to run on, one Pod runs every group there.
+        count = min(len(GROUPS), len(nodes))
+        for groups, node in zip(deal(count) if count > 1 else [[]], random.sample(nodes, count)):
+            shards.append(Shard(name, groups, node, out / node))
+            shards[-1].out.mkdir()
+            say('%s测试节点：%s（%s）' % (shards[-1].tag, node, '随机选中' if selected else '指定'))
+        run_suites(shards, owned)
     except (RuntimeError, subprocess.TimeoutExpired, ValueError) as exc:
         error = str(exc)
         say('出错：' + error)
@@ -859,17 +610,7 @@ def run(prefix):
         # Also when the run is cancelled.
         leftovers = cleanup(shards, owned)
 
-    if RECONCILE:
-        doc = conclude_reconcile(prefix, targets, version, error, leftovers)
-        write(prefix, doc, targets)
-        shutil.rmtree(str(out))
-        for n in doc['nodes']:
-            if n['pod']:
-                say('%s：删掉 %d 个块层，%s' % (n['node'], n['deleted'], '留下 %d 个' % n['kept'] if n['verdict'] == 'passed'
-                                           else '没有做完：' + n['reason']))
-        say('块层清理%s' % ('完成' if doc['verdict'] == 'passed' else '没有做完：' + doc['reason']))
-        return 0 if doc['verdict'] == 'passed' else 1
-    doc = conclude(prefix, shards, selected, parallel, version, error, leftovers)
+    doc = conclude(prefix, shards, selected, error, leftovers)
     write(prefix, doc, shards)
     shutil.rmtree(str(out))
     counts = doc['counts']

@@ -5,8 +5,6 @@ kind: Pod
 metadata:
   name: evict
   namespace: {{ .Namespace }}
-  labels:
-    blockoverlayfs.io/e2e: "true"
   annotations:
     blockoverlayfs.io/ephemeral-storage: '{"c":{"limit":"512Mi"}}'
 spec:

@@ -3,7 +3,8 @@
 package e2e
 
 import (
-	"fmt"
+	"errors"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -16,15 +17,15 @@ import (
 
 const pluginSelector = "app.kubernetes.io/name=blockoverlayfs"
 
-// nodeExec runs a shell command on the node: in the node's mount namespace, from the suite's Pod on the node, which
-// shares the node's process and network namespaces.
-func nodeExec(command string) (string, error) {
-	return kubectl("-n", suiteNamespace, "exec", nodePod, "--", "nsenter", "-t", "1", "-m", "--", "sh", "-c", command)
+// probeExec runs a shell command in the suite's Pod on the node. The Pod has no privilege there: it sees the node's
+// loop devices in sysfs, and reaches the plugin's metrics at the node's address, its HOST_IP.
+func probeExec(command string) (string, error) {
+	return execIn(suiteNamespace, probePod, "probe", command)
 }
 
 // pluginField reads a field of the plugin's Pod on the node by its JSONPath, relative to the Pod.
 func pluginField(jsonpath string) (string, error) {
-	return kubectl("-n", suiteNamespace, "get", "pods", "-l", pluginSelector, "--field-selector", "spec.nodeName="+node,
+	return kubectl("-n", pluginNamespace, "get", "pods", "-l", pluginSelector, "--field-selector", "spec.nodeName="+node,
 		"-o", "jsonpath={.items[*]"+jsonpath+"}")
 }
 
@@ -36,18 +37,12 @@ func registered(g gomega.Gomega) {
 	g.Expect(ready).To(gomega.Equal("true"), pluginReport)
 }
 
-// pluginReport describes the plugin's Pod and returns its log, for the output of a failure: the plugin is gone by
-// the time the suite's report is read.
+// pluginReport describes the plugin's Pod on the node and returns the end of its log, for the output of a failure.
 func pluginReport() string {
-	described, _ := kubectl("-n", suiteNamespace, "describe", "pods", "-l", pluginSelector)
-	log, _ := kubectl("-n", suiteNamespace, "logs", "-l", pluginSelector, "--tail=-1", "--prefix")
-	return "the plugin's Pod:\n" + described + "\nits log:\n" + log
-}
-
-// pluginRestarts counts how often kubelet has restarted the plugin's container.
-func pluginRestarts() int {
-	ginkgo.GinkgoHelper()
-	return must(strconv.Atoi(must(pluginField(".status.containerStatuses[0].restartCount"))))
+	name, _ := pluginField(".metadata.name")
+	described, _ := kubectl("-n", pluginNamespace, "describe", "pod", name)
+	log, _ := kubectl("-n", pluginNamespace, "logs", name, "--tail=500")
+	return "the plugin's Pod:\n" + described + "\nthe end of its log:\n" + log
 }
 
 // pluginLog returns the log of the plugin's running container.
@@ -56,20 +51,13 @@ func pluginLog() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return kubectl("-n", suiteNamespace, "logs", name)
-}
-
-// pluginPID returns the process ID of the plugin on the node.
-func pluginPID() string {
-	ginkgo.GinkgoHelper()
-	return must(nodeExec("pidof blockoverlayfs"))
+	return kubectl("-n", pluginNamespace, "logs", name)
 }
 
 // metric reads a sample of the plugin's metrics: that of a gauge or counter whose labels have the given names and
 // values, or the count of a histogram. A sample that is not there reads as 0, like a counter that has yet to count.
 func metric(name string, labels ...string) (float64, error) {
-	// The suite's Pod on the node is on the node's network, where the plugin serves its metrics.
-	text, err := kubectl("-n", suiteNamespace, "exec", nodePod, "--", "wget", "-q", "-T", "5", "-O", "-", "http://127.0.0.1:"+metricsPort+"/metrics")
+	text, err := probeExec("wget -q -T 5 -O - http://$HOST_IP:" + metricsPort + "/metrics")
 	if err != nil {
 		return 0, err
 	}
@@ -108,29 +96,31 @@ func creations(result string) float64 {
 	return must(metric("blockoverlayfs_container_creations_total", "result", result))
 }
 
-// layerScript prints what the image of a container is to the container: its arguments are the store's root, the
-// container's ID and the snapshotter's snapshots directory.
-const layerScript = `img=%[1]s/%[2]s.img
-[ -e "$img" ] || { echo dir; exit 0; }
-dev=$(losetup -n -O NAME -j "$img" | head -n 1)
-[ -n "$dev" ] || { echo image-not-attached; exit 0; }
-mp=$(findmnt -rn -o TARGET -S "$dev" | head -n 1)
-case "$mp" in
-%[3]s/*) if [ -d "$mp/fs" ]; then echo block; else echo mounted-without-fs; fi ;;
-*) echo "mounted-at:${mp:-nowhere}" ;;
-esac`
+// loopsScript prints the node's loop devices that have a backing file: the size of each in bytes, and its file. The
+// kernel lists them in sysfs to every container. The plugin names an image after its container's ID, and attaches a
+// loop device to it for as long as it is the container's layer.
+const loopsScript = `for d in /sys/block/loop*; do
+f=$(cat $d/loop/backing_file 2>/dev/null) || continue
+echo "$(($(cat $d/size) * 512)) $f"
+done`
 
-// layerIn says what the writable layer of a container is, for a store at root: "dir" when the container has no
-// image, "block" when its image is mounted over a snapshot directory and holds the upper directory, and otherwise
-// what is wrong with the image.
-func layerIn(root, id string) (string, error) {
+// blockLayer returns the size in bytes of a container's block layer, 0 when the container has none and keeps the
+// snapshotter's directory.
+func blockLayer(id string) (int64, error) {
 	if id == "" {
-		return "no-container", nil
+		return 0, errors.New("the Pod has no such container yet")
 	}
-	return nodeExec(fmt.Sprintf(layerScript, root, id, snapshotterRoot+"/snapshots"))
+	loops, err := probeExec(loopsScript)
+	if err != nil {
+		return 0, err
+	}
+	for _, loop := range strings.Split(loops, "\n") {
+		if size, file, _ := strings.Cut(loop, " "); strings.Contains(file, id+".img") {
+			return strconv.ParseInt(size, 10, 64)
+		}
+	}
+	return 0, nil
 }
-
-func layer(id string) (string, error) { return layerIn(storeRoot, id) }
 
 // kib reads a column of the last line of df -k output.
 func kib(df string, column int) int64 {
@@ -141,19 +131,12 @@ func kib(df string, column int) int64 {
 	return must(strconv.ParseInt(fields[column], 10, 64))
 }
 
-// storeScript prints the images of a store, at its argument, and the loop devices and the mounts that are theirs.
-// The node has loop devices and ext4 mounts of others.
-const storeScript = `ls -la %[1]s
-losetup -n -O NAME,BACK-FILE | awk -v root=%[1]s/ 'index($2, root) == 1' | while read -r dev image; do
-echo "$dev $image $(findmnt -rn -o TARGET -S "$dev")"
-done`
-
 // expectBlockSize checks that a container's layer is an image of size bytes, and that rootKiB, the size of the
 // container's root filesystem, is that of an ext4 filesystem in such an image.
 func expectBlockSize(id string, size, rootKiB int64) {
 	ginkgo.GinkgoHelper()
-	gomega.Expect(layer(id)).To(gomega.Equal("block"))
-	gomega.Expect(nodeExec(fmt.Sprintf("stat -c %%s %s/%s.img", storeRoot, id))).To(gomega.Equal(strconv.FormatInt(size, 10)))
+	// A loop device has whole sectors of 512 bytes.
+	gomega.Expect(blockLayer(id)).To(gomega.Equal(size &^ 511))
 	// ext4 keeps part of the image for itself.
 	gomega.Expect(rootKiB).To(gomega.And(gomega.BeNumerically(">", size/2048), gomega.BeNumerically("<", size/1024)))
 }
@@ -164,25 +147,28 @@ func expectBlock(namespace, name, container string, size int64) {
 	expectBlockSize(containerID(namespace, name, container), size, kib(must(execIn(namespace, name, container, "df -k /")), 1))
 }
 
-// expectDir checks that a running container keeps the snapshotter's directory: it has no image, and its root
-// filesystem is the node's disk.
+// expectDir checks that a running container keeps the snapshotter's directory.
 func expectDir(namespace, name, container string) {
 	ginkgo.GinkgoHelper()
-	gomega.Expect(layer(containerID(namespace, name, container))).To(gomega.Equal("dir"))
-	gomega.Expect(kib(must(execIn(namespace, name, container, "df -k /")), 1)).To(gomega.Equal(kib(must(nodeExec("df -k /var/lib/containerd")), 1)))
+	gomega.Expect(blockLayer(containerID(namespace, name, container))).To(gomega.BeZero())
 }
 
-// settled reports through g whether the plugin has taken every layer away: the store holds no image, no loop device
-// has one of its images, which it has for as long as the image is mounted, and the plugin's own count agrees.
+// layersOfSuite finds, in the plugin's log, the IDs of the containers of the suite's Pods that the plugin gave a
+// layer. The log names a container's Pod with its namespace, and the namespaces of the specs are named after the
+// suite's.
+var layersOfSuite = regexp.MustCompile(`msg="created block writable layer".* id=([0-9a-f]+) pod=` + regexp.QuoteMeta(suiteNamespace) + `-`)
+
+// settled reports through g whether the plugin has taken away the layer of every container of the suite's Pods:
+// none has its loop device any more, and the plugin has left no layer unsettled.
 func settled(g gomega.Gomega) {
-	counts, err := nodeExec(fmt.Sprintf(`ls %[1]s | grep -c '\.img$'
-losetup -n -O BACK-FILE | grep -c '^%[1]s/'
-true`, storeRoot))
+	log, err := pluginLog()
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	g.Expect(strings.Fields(counts)).To(gomega.Equal([]string{"0", "0"}), "images in the store, loop devices that have one")
-	for _, name := range []string{"blockoverlayfs_layers", "blockoverlayfs_reconcile_unsettled_layers"} {
-		value, err := metric(name)
-		g.Expect(err).NotTo(gomega.HaveOccurred())
-		g.Expect(value).To(gomega.BeZero(), name)
+	loops, err := probeExec(loopsScript)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	for _, layer := range layersOfSuite.FindAllStringSubmatch(log, -1) {
+		g.Expect(loops).NotTo(gomega.ContainSubstring(layer[1]+".img"), "the layer of a container of the suite is still attached")
 	}
+	unsettled, err := metric("blockoverlayfs_reconcile_unsettled_layers")
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	g.Expect(unsettled).To(gomega.BeZero())
 }

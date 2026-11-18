@@ -1,0 +1,20 @@
+# The Pod through which the suite reads the node. It has no privilege there.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: {{ .Namespace }}
+spec:
+  nodeName: {{ .Node }}
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: probe
+      image: {{ .Image }}
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "86400"]
+      env:
+        # Where the plugin serves its metrics: its Pod is on the node's network.
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP

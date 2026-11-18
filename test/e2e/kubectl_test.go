@@ -53,17 +53,11 @@ func must[T any](v T, err error) T {
 	return v
 }
 
-// pod describes a Pod of one container, c, on the node under test. Its zero value sleeps, declares nothing, and
-// carries the label by which the base values select Pods.
+// pod describes a Pod of one container, c, on the node under test. Its zero value sleeps and declares nothing.
 type pod struct {
 	Namespace, Name string
 	// Storage is the value of the plugin's annotation.
-	Storage             string
-	Labels, Annotations map[string]string
-	// Unselected leaves out the label by which the base values select Pods.
-	Unselected    bool
-	Command       []string
-	RestartPolicy string
+	Storage string
 }
 
 // apply creates the objects of a manifest of testdata. The manifest sees p's fields, the node under test as .Node
@@ -120,7 +114,7 @@ func createNamespace(name string) {
 var namespaces, liveNamespaces int
 
 // namespace creates a namespace for the specs of the container or spec that calls it, and deletes it once those are
-// over. When the last namespace is gone it waits for the plugin to have taken every layer away.
+// over. When the last namespace is gone it waits for the plugin to have taken away the layers of its containers.
 func namespace() string {
 	ginkgo.GinkgoHelper()
 	namespaces++
@@ -137,39 +131,4 @@ func namespace() string {
 		gomega.Eventually(settled).WithTimeout(12 * time.Minute).Should(gomega.Succeed())
 	})
 	return name
-}
-
-// helmUpgrade deploys the chart on the node under test alone, with the base values and the plugin image under test,
-// and what args add.
-func helmUpgrade(args ...string) {
-	ginkgo.GinkgoHelper()
-	i := strings.LastIndex(image, ":")
-	gomega.Expect(i).To(gomega.BeNumerically(">", strings.LastIndex(image, "/")), "E2E_IMAGE names a tag")
-	name, tag := image[:i], image[i+1:]
-	must(run("", "helm", append([]string{
-		"upgrade", "--install", releaseName, chart, "--namespace", suiteNamespace, "--reset-values",
-		"--values", baseValues, "--set-string", "image.name=" + name, "--set-string", "image.tag=" + tag,
-		"--set-json", fmt.Sprintf("affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms="+
-			`[{"matchFields":[{"key":"metadata.name","operator":"In","values":[%q]}]}]`, node),
-	}, args...)...))
-}
-
-// upgrade deploys the chart and waits for the plugin to have registered with containerd.
-func upgrade(args ...string) {
-	ginkgo.GinkgoHelper()
-	helmUpgrade(args...)
-	if _, err := kubectl("-n", suiteNamespace, "rollout", "status", "daemonset/"+releaseName, "--timeout=180s"); err != nil {
-		// BeforeSuite deploys the chart too, and nothing reports on the plugin after it.
-		fmt.Fprintln(ginkgo.GinkgoWriter, pluginReport())
-		ginkgo.Fail(err.Error())
-	}
-	gomega.Eventually(registered).Should(gomega.Succeed())
-}
-
-// withoutPlugin takes the plugin's Pod off the node, and waits for the plugin to have stopped.
-func withoutPlugin() {
-	ginkgo.GinkgoHelper()
-	// The node has no such label.
-	helmUpgrade("--set-string", `nodeSelector.blockoverlayfs\.io/e2e-absent=true`)
-	gomega.Eventually(nodeExec).WithArguments("pidof blockoverlayfs || echo gone").Should(gomega.Equal("gone"))
 }

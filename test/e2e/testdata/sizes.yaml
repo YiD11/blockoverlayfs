@@ -1,11 +1,9 @@
-# One container for every way of declaring a size. The sizes the specs expect assume the base values.
+# One container for every way of declaring a size.
 apiVersion: v1
 kind: Pod
 metadata:
   name: matrix
   namespace: {{ .Namespace }}
-  labels:
-    blockoverlayfs.io/e2e: "true"
   annotations:
     blockoverlayfs.io/ephemeral-storage: '{"request-only":{"request":"4Gi"},"limit-only":{"limit":"1Gi"},"both":{"request":"512Mi","limit":"2Gi"},"none":{}}'
 spec:
@@ -23,11 +21,10 @@ kind: Pod
 metadata:
   name: edge
   namespace: {{ .Namespace }}
-  labels:
-    blockoverlayfs.io/e2e: "true"
   annotations:
-    # A limit that leaves less than the smallest layer once limitOffset is taken off, and none.
-    blockoverlayfs.io/ephemeral-storage: '{"tiny":{"limit":"260Mi"},"zero":{"limit":"0"}}'
+    # For tiny a limit that leaves less than the smallest layer once the plugin's limit_offset is taken off, and
+    # for zero none.
+    blockoverlayfs.io/ephemeral-storage: {{ json .Storage }}
 spec:
   nodeName: {{ .Node }}
   terminationGracePeriodSeconds: 1
@@ -40,8 +37,6 @@ kind: Pod
 metadata:
   name: withinit
   namespace: {{ .Namespace }}
-  labels:
-    blockoverlayfs.io/e2e: "true"
   annotations:
     blockoverlayfs.io/ephemeral-storage: '{"init":{"limit":"300Mi"},"main":{"request":"500Mi"}}'
 spec:
